@@ -471,7 +471,33 @@ app.post("/api/change-own-password", async (req, res) => {
   }
 });
 
-// Spåra alla API-anrop (men inte statiska filer eller admin-pollning)
+// Fabriksåterställning — rensar lager/sälj-data helt. Rör ALDRIG användare,
+// lösenord, inställningar eller listor (kategorier, lager-orter, osv), så
+// man aldrig blir utelåst eller behöver bygga upp konfigurationen igen.
+// Kräver adminroll + att klienten skickar en exakt bekräftelsefras, som ett
+// extra skydd mot att detta triggas av misstag (t.ex. ett buggigt skript).
+app.post("/api/factory-reset", async (req, res) => {
+  try {
+    const usersRow = await dbGet("ow:users");
+    const users = usersRow ? JSON.parse(usersRow.value) : [];
+    const me = users.find(u => u.username === req.authUsername);
+    if (!me || me.role !== "admin") return res.status(403).json({ ok:false, error:"Kräver adminbehörighet" });
+    if (req.body?.confirm !== "NOLLSTÄLL") {
+      return res.status(400).json({ ok:false, error:"Fel bekräftelsefras" });
+    }
+    await dbSet("ow:items", "[]");
+    await dbSet("ow:sales", "[]");
+    await dbSet("ow:trash", "[]");
+    await dbSet("ow:customers", "[]");
+    await dbSet("ow:activitylog", "[]");
+    console.log(`[reset] Fabriksåterställning utförd av ${req.authUsername}`);
+    res.json({ ok:true });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
+
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/")) {
     const ip = clientIp(req);
@@ -562,6 +588,18 @@ app.post("/api/:key", async (req, res) => {
           }
           return { ...rest, password: prev?.password };
         });
+        // SKYDD: måste alltid finnas minst en huvudadmin (admin utan
+        // tilldelat hemmalager) — annars kan ingen längre hantera hela
+        // systemet eller skapa fler admins. Detta är den riktiga spärren
+        // (klientens kontroller kan kringgås, den här kan det inte).
+        // Undantag: om det ALDRIG funnits några användare (bootstrap av en
+        // helt ny installation) tillåts det, annars skulle första
+        // installationen aldrig kunna komma igång.
+        const hadUsersBefore = existing.length > 0;
+        const huvudadminCount = merged.filter(u => u.role==="admin" && !u.homeWarehouse).length;
+        if (hadUsersBefore && huvudadminCount === 0) {
+          return res.status(400).json({ error: "Går inte — måste finnas minst en huvudadmin (admin utan tilldelat hemmalager)." });
+        }
         req.body.value = JSON.stringify(merged);
       } catch (e) {
         return res.status(400).json({ error: "Ogiltig användardata: " + e.message });
