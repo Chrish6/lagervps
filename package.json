@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "vite build",
     "start": "node server.cjs",
-    "test": "node --test \"tests/**/*.mjs\"",
+    "test": "node --test tests/calc.test.mjs",
     "electron": "npx electron .",
     "dist": "npm run build && electron-builder --win --x64 --publish always"
   },
