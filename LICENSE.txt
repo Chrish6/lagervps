@@ -1,0 +1,6 @@
+Lager — Lagerhantering för karossdelar
+
+Copyright (c) 2025 Lager
+
+All rights reserved. This software is proprietary and confidential.
+Unauthorized copying, distribution or modification is strictly prohibited.

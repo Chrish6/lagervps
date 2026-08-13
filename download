@@ -1,0 +1,8 @@
+node_modules/
+dist/
+lager.db
+backups/
+*.log
+.DS_Store
+electron-dist/
+credentials.enc
