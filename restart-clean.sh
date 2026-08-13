@@ -1,19 +1,17 @@
 #!/bin/bash
-# restart-clean.sh — "Full ren omstart", samma metod som beskrivs i
-# Windows- och Raspberry Pi-guiderna, fast för VPS:en. Använd om en
-# uppdatering inte verkar slå igenom, eller om servern beter sig konstigt
-# trots en vanlig "pm2 restart".
+# restart-clean.sh — Docker-varianten. "Full ren omstart" när något krånglar.
+# Datan i ./data (databas, backuper) rörs INTE — bara containern byggs om
+# från grunden.
 set -e
 
-echo "Full ren omstart av Lager..."
-pm2 kill
-pkill -f node || true
-sleep 1
-pm2 start ecosystem.config.js
-pm2 save
-pm2 flush lager
+echo "Stoppar och tar bort containern..."
+docker compose down
+
+echo "Bygger om helt från grunden (ingen cache)..."
+docker compose build --no-cache
+
+echo "Startar..."
+docker compose up -d
 
 echo ""
-echo "Klart. Kontrollera:"
-echo "  pm2 status"
-echo "  pm2 logs lager --lines 20 --nostream"
+echo "Klart. Kolla loggar med: docker compose logs -f lager"

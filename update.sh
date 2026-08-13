@@ -1,37 +1,35 @@
 #!/bin/bash
-# update.sh — Motsvarigheten till UPPDATERA.bat, fast för Linux-VPS.
-# Kör vid varje uppdatering: bash update.sh
+# update.sh — Docker-varianten. Kör vid varje uppdatering: bash update.sh
 set -e
 
 echo "========================================"
-echo "   Uppdaterar Lager (VPS)..."
+echo "   Uppdaterar Lager (Docker)..."
 echo "========================================"
 echo ""
 
-echo "Kör automatiska tester först..."
-npm test || { echo "FEL: Testerna misslyckades — avbryter uppdateringen."; exit 1; }
-
-echo ""
 echo "Hämtar från GitHub..."
 git pull
 
 echo ""
-echo "Installerar ev. nya beroenden..."
-npm install
+echo "Bygger om och startar om containern..."
+# --build bygger om imagen med den nya koden. Datan i ./data (databas,
+# backuper) rörs inte — den ligger utanför containern, se docker-compose.yml.
+docker compose up -d --build
 
 echo ""
-echo "Bygger om appen..."
-npm run build
-
-echo ""
-echo "Startar om servern..."
-pm2 restart lager
+echo "Väntar på att servern svarar..."
+for i in $(seq 1 20); do
+  if curl -sf http://localhost:3000/api/network > /dev/null 2>&1; then
+    echo "  Servern svarar!"
+    break
+  fi
+  sleep 1
+done
 
 echo ""
 echo "========================================"
 echo "   Klart!"
 echo "========================================"
 echo ""
-echo "Kontrollera status: pm2 status"
-echo "Se loggen:          pm2 logs lager --lines 30 --nostream"
+echo "  Loggar: docker compose logs -f lager"
 echo ""

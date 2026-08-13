@@ -38,7 +38,11 @@ process.on("unhandledRejection", (err) => {
 // varianten server.cjs har kvar mDNS-blocket.)
 
 const app  = express();
-const DB_PATH = path.join(__dirname, "lager.db");
+// Konfigurerbar via miljövariabel (används av Docker-uppsättningen för att
+// peka på en monterad, beständig mapp) — annars exakt samma beteende som
+// innan (en lager.db bredvid server.cjs), inget ändras för Windows/vanlig
+// VPS-drift utan Docker.
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "lager.db");
 
 
 // ── Databas ───────────────────────────────────────────────────────────────────
@@ -1329,7 +1333,9 @@ app.get("/{*path}", (req, res) => {
 // ingen OneDrive-app här att spara direkt i (till skillnad från Windows-
 // varianten, server.cjs). Vill du ändå ha backuperna i OneDrive (eller
 // Google Drive, Dropbox, m.fl.) sker det via rclone-kopplingen nedan.
-const LOCAL_BACKUP_DIR = path.join(__dirname, "backups");
+// Konfigurerbar via miljövariabel (Docker-uppsättningen pekar den mot en
+// monterad, beständig mapp) — annars exakt samma beteende som innan.
+const LOCAL_BACKUP_DIR = process.env.BACKUP_DIR || path.join(__dirname, "backups");
 function getBackupDir() {
   try {
     if (!fs.existsSync(LOCAL_BACKUP_DIR)) fs.mkdirSync(LOCAL_BACKUP_DIR, { recursive: true });

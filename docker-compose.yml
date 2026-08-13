@@ -1,0 +1,22 @@
+services:
+  lager:
+    build: .
+    container_name: lager
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"   # bara nåbar lokalt — nginx på servern sköter HTTPS utåt
+    volumes:
+      # KRITISKT: utan de här skulle databasen och backuperna raderas varje
+      # gång containern byggs om (t.ex. vid en uppdatering). Mappen ./data
+      # på VPS:en lever kvar oavsett vad som händer med containern.
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - DB_PATH=/app/data/lager.db
+      - BACKUP_DIR=/app/data/backups
+      # Valfritt — skickar backuper vidare till OneDrive/Google Drive/m.fl.
+      # via rclone. Lämna tomt för att bara spara lokalt i ./data/backups.
+      - RCLONE_REMOTE=
+      # Valfritt — extra lösenord för admin-panelen (/admin), utöver det
+      # vanliga admin-kontokravet.
+      # - ADMIN_PANEL_PASSWORD=byt-till-nagot-eget
