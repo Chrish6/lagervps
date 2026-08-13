@@ -4,7 +4,11 @@ services:
     container_name: lager
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3000:3000"   # bara nåbar lokalt — nginx på servern sköter HTTPS utåt
+      # TEMPORÄRT: öppen mot hela internet på ren http, ingen kryptering —
+      # bara för att komma igång innan domän+HTTPS finns på plats. Byt
+      # tillbaka till "127.0.0.1:3000:3000" (bara lokalt nåbar) den dagen
+      # nginx+HTTPS sätts upp, så nginx blir den enda vägen in.
+      - "3000:3000"
     volumes:
       # KRITISKT: utan de här skulle databasen och backuperna raderas varje
       # gång containern byggs om (t.ex. vid en uppdatering). Mappen ./data
