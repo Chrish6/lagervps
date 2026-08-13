@@ -3464,9 +3464,34 @@ function SuppliersPage({ suppliers, saveSuppliers, items, pop, toast$, can, isAd
 }
 
 // ─── Backup Page ──────────────────────────────────────────────────────────────
-function BackupPage({ items, sales, users, settings, suppliers, roles, lists, activityLog, favorites, trash, saveItems, saveSales, saveUsers, saveSettings, saveSuppliers, saveRoles, saveLists, saveTrash, setItems, setSales, setSettings, setSuppliers, pop, toast$, can, isAdmin }) {
+function BackupPage({ items, sales, users, settings, suppliers, roles, lists, activityLog, favorites, trash, saveItems, saveSales, saveUsers, saveSettings, saveSuppliers, saveRoles, saveLists, saveTrash, setItems, setSales, setSettings, setSuppliers, pop, toast$, can, isAdmin, isFullAdmin, customers, saveCustomers }) {
   if (!isAdmin && !can("canBackup")) return <Page><TopBar title="Backup" onBack={pop}/><div style={{padding:40,textAlign:"center",color:MU}}><i className="fa-solid fa-lock" style={{fontSize:32,marginBottom:12,display:"block"}}/>Du saknar behörighet.</div></Page>;
   const [restoring, setRestoring] = useState(false);
+  // Fabriksåterställning — rensar all lager-/sälj-data, men rör INTE
+  // användarkonton (så man inte blir utelåst av misstag). Kräver att man
+  // skriver en bekräftelsefras för att undvika ett klick-i-onödan-misstag.
+  const [resetConfirmText, setResetConfirmText] = useState("");
+  const [resetting, setResetting] = useState(false);
+  const doFactoryReset = async () => {
+    setResetting(true);
+    try {
+      const r = await fetch(`${API}/factory-reset`, {
+        method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
+        body: JSON.stringify({ confirm: resetConfirmText.trim() }),
+      }).then(r=>r.json());
+      if (!r.ok) {
+        toast$(r.error||"Kunde inte återställa","error");
+      } else {
+        setItems([]); setSales([]);
+        saveTrash([]); saveCustomers?.([]);
+        toast$("Återställt — allt är nu tomt, redo att börja om","success");
+        setResetConfirmText("");
+      }
+    } catch {
+      toast$("Kunde inte nå servern","error");
+    }
+    setResetting(false);
+  };
   const fileRef = useRef(null);
   // Generisk molnanslutning för backup (rclone) — fungerar med valfri
   // molntjänst rclone stödjer, inte bara OneDrive.
@@ -3619,6 +3644,25 @@ function BackupPage({ items, sales, users, settings, suppliers, roles, lists, ac
             <Btn onClick={saveCloudRemote} disabled={cloudSaving}><Icon name="check"/> Spara</Btn>
           </div>
         </div>
+
+        {/* Fabriksåterställning — bara för huvudadmin */}
+        {isFullAdmin&&(
+          <div style={{background:WH,borderRadius:10,border:`1px solid ${R}30`,padding:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:R,textTransform:"uppercase",letterSpacing:.7,marginBottom:6}}><Icon name="triangle-exclamation" style={{marginRight:5}}/>Fabriksåterställning</div>
+            <div style={{fontSize:13,color:TM,marginBottom:12}}>
+              Rensar <b>alla delar, all säljlogg, papperskorgen och kundregistret</b> — allt börjar helt tomt. Användare, inställningar och listor (kategorier, lager-orter osv.) rörs inte, så du blir inte utelåst.
+            </div>
+            <div style={{background:R+"08",border:`1px solid ${R}20`,borderRadius:8,padding:10,marginBottom:12,fontSize:12,color:R,fontWeight:600}}>
+              ⚠ Går inte att ångra. Skapa en backup först om du är osäker.
+            </div>
+            <label style={{display:"block",fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:4}}>Skriv "NOLLSTÄLL" för att bekräfta</label>
+            <input value={resetConfirmText} onChange={e=>setResetConfirmText(e.target.value)} placeholder="NOLLSTÄLL"
+              style={{width:"100%",padding:"9px 12px",border:`1.5px solid ${BD}`,borderRadius:7,fontSize:14,marginBottom:10,boxSizing:"border-box"}}/>
+            <Btn full variant="red" disabled={resetConfirmText.trim()!=="NOLLSTÄLL"||resetting} onClick={doFactoryReset}>
+              {resetting?"Återställer…":"Nollställ allt"}
+            </Btn>
+          </div>
+        )}
 
         {/* Restore */}
         <div style={{background:WH,borderRadius:10,border:`1px solid ${BD}`,padding:16}}>
@@ -7164,7 +7208,18 @@ function SalesLogPage({ sales, saveSales, items, saveItems, users, can, isAdmin,
 function UsersPage({ users, saveUsers, roles, currentUser, push, pop, toast$, can, isAdmin, isFullAdmin, isPlatsAdmin }) {
   if (!isAdmin && !can("canManageUsers")) return <Page><TopBar title="Användare" onBack={pop}/><div style={{padding:40,textAlign:"center",color:MU}}><i className="fa-solid fa-lock" style={{fontSize:32,marginBottom:12,display:"block"}}/>Du saknar behörighet.</div></Page>;
   const [confirmDel, setConfirmDel] = useState(null);
+  // Huvudadmin = admin UTAN tilldelat hemmalager. Måste alltid finnas minst
+  // en — annars kan ingen längre hantera hela systemet, eller skapa fler
+  // admins överhuvudtaget.
+  const huvudadminCount = users.filter(u => u.role==="admin" && !u.homeWarehouse).length;
+  const isLastHuvudadmin = u => u.role==="admin" && !u.homeWarehouse && huvudadminCount<=1;
   const del = async (id) => {
+    const target = users.find(u=>u.id===id);
+    if (target && isLastHuvudadmin(target)) {
+      toast$("Går inte — måste finnas minst en huvudadmin","error");
+      setConfirmDel(null);
+      return;
+    }
     await saveUsers(users.filter(u=>u.id!==id)); toast$("Borttagen","success"); setConfirmDel(null);
   };
   const roleOf = u => (roles||[]).find(r => r.id === u.roleId);
@@ -7202,7 +7257,11 @@ function UsersPage({ users, saveUsers, roles, currentUser, push, pop, toast$, ca
               <div style={{marginLeft:"auto",display:"flex",gap:6}}>
                 {u.role!=="admin"&&<Btn variant="blue" small onClick={()=>push("perms",{user:u})}><Icon name="key"/></Btn>}
                 {(isFullAdmin || u.role!=="admin")&&<Btn variant="ghost" small onClick={()=>push("edituser",{user:u})}><Icon name="pen"/></Btn>}
-                {u.id!==currentUser.id&&(isFullAdmin||u.role!=="admin")&&<Btn variant="ghost" small onClick={()=>setConfirmDel(u)} style={{color:R}}><Icon name="trash"/></Btn>}
+                {u.id!==currentUser.id&&(isFullAdmin||u.role!=="admin")&&(
+                  isLastHuvudadmin(u)
+                    ? <Btn variant="ghost" small disabled title="Måste finnas minst en huvudadmin" style={{color:MU,opacity:.4,cursor:"not-allowed"}}><Icon name="lock"/></Btn>
+                    : <Btn variant="ghost" small onClick={()=>setConfirmDel(u)} style={{color:R}}><Icon name="trash"/></Btn>
+                )}
               </div>
             </div>
             {u.role!=="admin"&&(
@@ -8143,6 +8202,20 @@ function EditUserPage({ user, users, roles, saveUsers, pop, toast$, lists, curre
     // Extra skydd (utöver att UI:t redan låser fältet): en platsadmin kan
     // aldrig spara en användare med ett annat hemmalager än sitt eget.
     const finalF = lockedWarehouse ? { ...f, homeWarehouse: lockedWarehouse } : f;
+
+    // Skydd: får inte göra den SISTA huvudadminen (admin utan hemmalager)
+    // till något annat (annan roll, eller ge dem ett hemmalager så de blir
+    // en begränsad platsadmin istället) — då finns ingen kvar som kan
+    // hantera hela systemet.
+    if (finalF.id) {
+      const wasHuvudadmin = user?.role==="admin" && !user?.homeWarehouse;
+      const stillHuvudadmin = finalF.role==="admin" && !finalF.homeWarehouse;
+      const otherHuvudadmins = users.filter(u=>u.id!==finalF.id && u.role==="admin" && !u.homeWarehouse).length;
+      if (wasHuvudadmin && !stillHuvudadmin && otherHuvudadmins===0) {
+        toast$("Går inte — måste finnas minst en huvudadmin (utan hemmalager)","error");
+        return;
+      }
+    }
 
     // Lösenordet hashas alltid på SERVERN, aldrig i webbläsaren — se
     // servens hantering av fältet newPlainPassword. Lämnas fältet tomt vid
