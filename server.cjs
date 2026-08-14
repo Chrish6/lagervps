@@ -556,6 +556,71 @@ app.get("/api/:key", async (req, res) => {
   } catch (e) { stats.errors++; res.status(500).json({ error: e.message }); }
 });
 
+app.post("/api/restore", async (req, res) => {
+  try {
+    stats.requests++;
+    if (!req.body || typeof req.body !== "object") {
+      console.error("[FEL] restore: body tom eller ogiltig, typeof =", typeof req.body);
+      return res.status(400).json({ error: "Ingen data mottogs (body tom)" });
+    }
+    const { items = [], sales = null, users = null, settings = null, suppliers = [], roles = null, lists = null, activitylog = null, favorites = null, trash = null, mode = "replace", first = false } = req.body;
+
+    if (!Array.isArray(items)) {
+      console.error("[FEL] restore: items är inte en lista, typeof =", typeof items, "värde:", JSON.stringify(items)?.slice(0,200));
+      return res.status(400).json({ error: "items är inte en lista" });
+    }
+    if (items.length === 0) {
+      console.error("[FEL] restore: tom batch mottagen, first =", first, "hela body-nycklar:", Object.keys(req.body));
+      return res.status(400).json({ error: "Tom batch (0 delar mottogs)" });
+    }
+
+    // Dela upp items i lätt lista + bilder
+    const lightItems = [];
+    const imageRows = [];
+    for (const it of items) {
+      const imgs = it.images || [];
+      const light = { ...it, images: [], hasImages: imgs.length };
+      lightItems.push(light);
+      if (imgs.length > 0) imageRows.push([it.id, JSON.stringify(imgs)]);
+    }
+
+    // Hämta befintlig lista (för append), eller börja om (för first batch)
+    let existing = [];
+    if (!first) {
+      const row = await dbGet("ow:items");
+      existing = row ? JSON.parse(row.value) : [];
+    }
+    const combined = existing.concat(lightItems);
+
+    await new Promise((resolve, reject) => {
+      db.serialize(() => {
+        db.run("BEGIN TRANSACTION");
+        if (first) db.run("DELETE FROM images");
+        const stmt = db.prepare("INSERT OR REPLACE INTO images(item_id,data,updated_at) VALUES(?,?,strftime('%s','now'))");
+        for (const [id, data] of imageRows) stmt.run(id, data);
+        stmt.finalize();
+        db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:items',?,strftime('%s','now'))", [JSON.stringify(combined)]);
+        if (sales) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:sales',?,strftime('%s','now'))", [JSON.stringify(sales)]);
+        if (users) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:users',?,strftime('%s','now'))", [JSON.stringify(users)]);
+        if (settings) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:settings',?,strftime('%s','now'))", [JSON.stringify(settings)]);
+        if (suppliers && suppliers.length) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:suppliers',?,strftime('%s','now'))", [JSON.stringify(suppliers)]);
+        if (roles) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:roles',?,strftime('%s','now'))", [JSON.stringify(roles)]);
+        if (lists) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:lists',?,strftime('%s','now'))", [JSON.stringify(lists)]);
+        if (activitylog) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:activitylog',?,strftime('%s','now'))", [JSON.stringify(activitylog)]);
+        if (favorites) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:favorites',?,strftime('%s','now'))", [JSON.stringify(favorites)]);
+        if (trash) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:trash',?,strftime('%s','now'))", [JSON.stringify(trash)]);
+        db.run("COMMIT", (err) => err ? reject(err) : resolve());
+      });
+    });
+
+    res.json({ ok: true, count: combined.length, items: combined });
+  } catch (e) {
+    stats.errors++;
+    console.error("[FEL] restore:", e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post("/api/:key", async (req, res) => {
   try {
     stats.requests++;
@@ -784,70 +849,6 @@ function sendImage(req, res, idx) {
 }
 
 // ── SNABB BULK-RESTORE — tar emot backup i batchar, delar upp på servern ─────
-app.post("/api/restore", async (req, res) => {
-  try {
-    stats.requests++;
-    if (!req.body || typeof req.body !== "object") {
-      console.error("[FEL] restore: body tom eller ogiltig, typeof =", typeof req.body);
-      return res.status(400).json({ error: "Ingen data mottogs (body tom)" });
-    }
-    const { items = [], sales = null, users = null, settings = null, suppliers = [], roles = null, lists = null, activitylog = null, favorites = null, trash = null, mode = "replace", first = false } = req.body;
-
-    if (!Array.isArray(items)) {
-      console.error("[FEL] restore: items är inte en lista, typeof =", typeof items, "värde:", JSON.stringify(items)?.slice(0,200));
-      return res.status(400).json({ error: "items är inte en lista" });
-    }
-    if (items.length === 0) {
-      console.error("[FEL] restore: tom batch mottagen, first =", first, "hela body-nycklar:", Object.keys(req.body));
-      return res.status(400).json({ error: "Tom batch (0 delar mottogs)" });
-    }
-
-    // Dela upp items i lätt lista + bilder
-    const lightItems = [];
-    const imageRows = [];
-    for (const it of items) {
-      const imgs = it.images || [];
-      const light = { ...it, images: [], hasImages: imgs.length };
-      lightItems.push(light);
-      if (imgs.length > 0) imageRows.push([it.id, JSON.stringify(imgs)]);
-    }
-
-    // Hämta befintlig lista (för append), eller börja om (för first batch)
-    let existing = [];
-    if (!first) {
-      const row = await dbGet("ow:items");
-      existing = row ? JSON.parse(row.value) : [];
-    }
-    const combined = existing.concat(lightItems);
-
-    await new Promise((resolve, reject) => {
-      db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
-        if (first) db.run("DELETE FROM images");
-        const stmt = db.prepare("INSERT OR REPLACE INTO images(item_id,data,updated_at) VALUES(?,?,strftime('%s','now'))");
-        for (const [id, data] of imageRows) stmt.run(id, data);
-        stmt.finalize();
-        db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:items',?,strftime('%s','now'))", [JSON.stringify(combined)]);
-        if (sales) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:sales',?,strftime('%s','now'))", [JSON.stringify(sales)]);
-        if (users) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:users',?,strftime('%s','now'))", [JSON.stringify(users)]);
-        if (settings) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:settings',?,strftime('%s','now'))", [JSON.stringify(settings)]);
-        if (suppliers && suppliers.length) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:suppliers',?,strftime('%s','now'))", [JSON.stringify(suppliers)]);
-        if (roles) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:roles',?,strftime('%s','now'))", [JSON.stringify(roles)]);
-        if (lists) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:lists',?,strftime('%s','now'))", [JSON.stringify(lists)]);
-        if (activitylog) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:activitylog',?,strftime('%s','now'))", [JSON.stringify(activitylog)]);
-        if (favorites) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:favorites',?,strftime('%s','now'))", [JSON.stringify(favorites)]);
-        if (trash) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:trash',?,strftime('%s','now'))", [JSON.stringify(trash)]);
-        db.run("COMMIT", (err) => err ? reject(err) : resolve());
-      });
-    });
-
-    res.json({ ok: true, count: combined.length, items: combined });
-  } catch (e) {
-    stats.errors++;
-    console.error("[FEL] restore:", e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
 // ── Hälsokontroll för externa övervakningsverktyg (t.ex. n8n) ──────────────
