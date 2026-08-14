@@ -3592,9 +3592,10 @@ function BackupPage({ items, sales, users, settings, suppliers, roles, lists, ac
       if (data.sales) setSales?.(data.sales);
       if (data.settings) setSettings?.(data.settings);
       if (data.suppliers) setSuppliers?.(data.suppliers);
-      if (data.roles) saveRoles?.(data.roles);
-      if (data.lists) saveLists?.(data.lists);
-      if (data.trash) saveTrash?.(data.trash);
+      // Roller, listor och papperskorg sparas redan av servern som en del
+      // av /api/restore (se server.cjs) — inget extra klientanrop behövs
+      // här. De gjorde bara dubbelarbete och orsakade "value saknas i
+      // body" ibland (t.ex. om fältet saknades i en äldre backup-fil).
 
       toast$(`Klart! ${finalItems.length} delar återställda — laddar om…`,"success");
       // Ladda om så allt (roller, listor, logg, användare) säkert syns
