@@ -145,7 +145,7 @@ async function sset(k,v) {
 async function saveOneItem(item) {
   try {
     const r = await fetch(`${API}/item/upsert`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ item })
     }).then(r=>r.json());
     return r.items || null;
@@ -155,7 +155,7 @@ async function saveOneItem(item) {
 async function deleteOneItem(id) {
   try {
     const r = await fetch(`${API}/item/delete`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ id })
     }).then(r=>r.json());
     return r.items || null;
@@ -166,7 +166,7 @@ async function deleteOneItem(id) {
 async function softDeleteOneItem(id) {
   try {
     const r = await fetch(`${API}/item/soft-delete`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ id })
     }).then(r=>r.json());
     return r.items || null;
@@ -176,7 +176,7 @@ async function softDeleteOneItem(id) {
 // Bilder — hämta för en artikel
 async function getImages(id) {
   try {
-    const r = await fetch(`${API}/images/${id}`).then(r=>r.json());
+    const r = await fetch(`${API}/images/${id}`, { headers: authHeaders() }).then(r=>r.json());
     return r.images || [];
   } catch { return []; }
 }
@@ -184,7 +184,7 @@ async function getImages(id) {
 async function setImages(id, images) {
   try {
     const r = await fetch(`${API}/images/${id}`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ images })
     });
     return r.ok;
@@ -195,7 +195,7 @@ async function setImages(id, images) {
 async function lockAcquire(itemId, user, action) {
   try {
     return await fetch(`${API}/lock/acquire`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ itemId, user, action })
     }).then(r=>r.json());
   } catch { return { ok: true }; } // vid nätverksfel — blockera inte användaren
@@ -203,7 +203,7 @@ async function lockAcquire(itemId, user, action) {
 async function lockRelease(itemId, user) {
   try {
     await fetch(`${API}/lock/release`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ itemId, user })
     });
   } catch {}
@@ -211,7 +211,7 @@ async function lockRelease(itemId, user) {
 async function lockHeartbeat(itemId, user) {
   try {
     return await fetch(`${API}/lock/heartbeat`, {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ itemId, user })
     }).then(r=>r.json());
   } catch { return { ok: true }; }
@@ -902,7 +902,7 @@ function AppInner() {
       const onEditPage = stackRef.current.some(s => ["edit","sell","checkout","bulkedit","import"].includes(s.name));
       if (onEditPage) return;
       try {
-        const r = await fetch(`${API}/delta?since=${lastSyncRef.current}`).then(r=>r.json());
+        const r = await fetch(`${API}/delta?since=${lastSyncRef.current}`, { headers: authHeaders() }).then(r=>r.json());
         if (!r || !Array.isArray(r.allIds)) return;
         lastSyncRef.current = r.maxUpdatedAt || lastSyncRef.current;
         setItems(prev => {
@@ -3552,7 +3552,7 @@ function BackupPage({ items, sales, users, settings, suppliers, roles, lists, ac
         const isFirst = i === 0;
         const res = await fetch(`${API}/restore`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify({
             items: batch,
             first: isFirst,
