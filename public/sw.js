@@ -19,7 +19,12 @@ self.addEventListener("activate", e => {
 self.addEventListener("fetch", e => {
   // API-anrop — alltid nätverket
   if (e.request.url.includes("/api/")) return;
-  
+
+  // Cacha bara vanliga http/https-förfrågningar — webbläsartillägg kan
+  // trigga fetch-events för egna interna adresser (t.ex. chrome-extension://),
+  // och Cache-API:et stödjer inte att spara sådana, bara krasch om vi försöker.
+  if (!e.request.url.startsWith("http")) return;
+
   e.respondWith(
     fetch(e.request)
       .then(resp => {
