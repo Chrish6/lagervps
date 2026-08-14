@@ -781,6 +781,14 @@ export default function App() {
 }
 
 function AppInner() {
+  // Sessionstoken laddas SYNKRONT här, direkt i komponentens kropp — inte i
+  // en useEffect. Effekter körs efter första renderingen, vilket tidigare
+  // var för sent: den första datahämtningen (users/items/sales/osv, några
+  // rader ner) hade redan hunnit köras utan token och fått 401 på allt.
+  // En vanlig funktionskörning i komponentkroppen körs däremot ALLTID
+  // innan några effekter, garanterat i rätt ordning.
+  setCurrentToken(loadToken());
+
   const [users, setUsers] = useState(null);
   const [items, setItems] = useState(null);
   const [session, setSession] = useState(() => loadSession());
@@ -1039,11 +1047,12 @@ function AppInner() {
     setCurrentUsername(u);
   }, [session, users]);
 
-  // Ladda sessionstoken vid start, och logga ut automatiskt om servern
-  // svarar 401 (sessionen ogiltig/utgången) — annars sitter man fast i ett
-  // trasigt läge där inget laddas men man inte förstår varför.
+  // Loggar ut automatiskt om servern svarar 401 (sessionen ogiltig/utgången)
+  // — annars sitter man fast i ett trasigt läge där inget laddas men man
+  // inte förstår varför. (Själva token-laddningen sker numera synkront,
+  // direkt i komponentens kropp — se överst i AppInner — så den garanterat
+  // är på plats INNAN första datahämtningen, inte i en useEffect här.)
   useEffect(() => {
-    setCurrentToken(loadToken());
     setOnSessionExpired(() => {
       clearSession();
       setCurrentToken(null);
