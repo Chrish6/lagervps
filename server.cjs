@@ -788,14 +788,17 @@ app.post("/api/restore", async (req, res) => {
   try {
     stats.requests++;
     if (!req.body || typeof req.body !== "object") {
+      console.error("[FEL] restore: body tom eller ogiltig, typeof =", typeof req.body);
       return res.status(400).json({ error: "Ingen data mottogs (body tom)" });
     }
     const { items = [], sales = null, users = null, settings = null, suppliers = [], roles = null, lists = null, activitylog = null, favorites = null, trash = null, mode = "replace", first = false } = req.body;
 
     if (!Array.isArray(items)) {
+      console.error("[FEL] restore: items är inte en lista, typeof =", typeof items, "värde:", JSON.stringify(items)?.slice(0,200));
       return res.status(400).json({ error: "items är inte en lista" });
     }
     if (items.length === 0) {
+      console.error("[FEL] restore: tom batch mottagen, first =", first, "hela body-nycklar:", Object.keys(req.body));
       return res.status(400).json({ error: "Tom batch (0 delar mottogs)" });
     }
 
