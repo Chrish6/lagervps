@@ -82,9 +82,31 @@ export function calcMargin(revenue, profit) {
  * @param {Array<{stockNumber?: string}>} trashedItems
  * @returns {string} Nästa lediga lagernummer, som sträng
  */
-export function nextAvailableStockNumber(activeItems = [], trashedItems = []) {
+/**
+ * Nästa lediga lagernummer. Om ett prefix ges (t.ex. "LH" för Laholm)
+ * genereras nummer i den formen (LH1, LH2, …) i en egen sekvens, skild
+ * från de vanliga siffer-numren — de två serierna krockar aldrig med
+ * varandra, oavsett hur många delar som finns i vardera.
+ * @param {Array} activeItems
+ * @param {Array} trashedItems
+ * @param {string} [prefix] - t.ex. "LH". Tomt = vanlig ren siffra (oförändrat beteende).
+ */
+export function nextAvailableStockNumber(activeItems = [], trashedItems = [], prefix = "") {
+  const all = [...activeItems, ...trashedItems];
+  if (prefix) {
+    const used = new Set(
+      all
+        .map(i => String(i?.stockNumber || ""))
+        .filter(sn => sn.startsWith(prefix))
+        .map(sn => parseInt(sn.slice(prefix.length), 10))
+        .filter(n => Number.isFinite(n) && n > 0)
+    );
+    let n = 1;
+    while (used.has(n)) n++;
+    return prefix + String(n);
+  }
   const used = new Set(
-    [...activeItems, ...trashedItems]
+    all
       .map(i => parseInt(i?.stockNumber || "0", 10))
       .filter(n => Number.isFinite(n) && n > 0)
   );

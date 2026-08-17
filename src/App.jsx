@@ -806,23 +806,45 @@ function AppInner() {
     if (isPWA) document.documentElement.classList.add("pwa-mode");
   }, []);
 
-  // PWA install prompt
+  // PWA install prompt — ska alltid synas i webbläsaren (inte skrivbords-
+  // eller mobilappen) tills man aktivt stänger den, oavsett om webbläsaren
+  // råkar skicka "beforeinstallprompt" eller inte (Chrome m.fl. har egna,
+  // oförutsägbara regler för OM/NÄR den händelsen alls skickas — att bara
+  // lita på den gjorde att knappen ibland aldrig dök upp alls).
   useEffect(() => {
     const handler = (e) => {
       e.preventDefault();
       setInstallPrompt(e);
-      setShowInstallBanner(true);
     };
     window.addEventListener("beforeinstallprompt", handler);
     return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
 
+  useEffect(() => {
+    const isPWA = window.matchMedia("(display-mode: standalone)").matches
+      || window.navigator.standalone === true;
+    const isDesktopApp = !!window.electronAPI; // skrivbordsappen — "installera" är irrelevant där
+    let dismissed = false;
+    try { dismissed = localStorage.getItem("ow:install_dismissed") === "1"; } catch {}
+    setShowInstallBanner(!isPWA && !isDesktopApp && !dismissed);
+  }, []);
+
   const installApp = async () => {
-    if (!installPrompt) return;
-    installPrompt.prompt();
-    const { outcome } = await installPrompt.userChoice;
-    if (outcome === "accepted") setShowInstallBanner(false);
-    setInstallPrompt(null);
+    if (installPrompt) {
+      // Webbläsaren stödjer den riktiga installationsdialogen — använd den
+      installPrompt.prompt();
+      const { outcome } = await installPrompt.userChoice;
+      if (outcome === "accepted") setShowInstallBanner(false);
+      setInstallPrompt(null);
+    } else {
+      // Webbläsaren skickade aldrig händelsen (vanligt, oförutsägbart) —
+      // visa instruktioner istället för att bara göra ingenting
+      toast$("Använd webbläsarens meny (⋮ eller dela-ikonen) → \"Installera app\" eller \"Lägg till på hemskärmen\"","info");
+    }
+  };
+  const dismissInstallBanner = () => {
+    setShowInstallBanner(false);
+    try { localStorage.setItem("ow:install_dismissed","1"); } catch {}
   };
 
   const [viewMode, setViewMode] = useState("cards");
@@ -1159,7 +1181,7 @@ function AppInner() {
           <button onClick={installApp} style={{background:WH,color:BX,border:"none",borderRadius:8,padding:"8px 14px",fontWeight:700,fontSize:13,cursor:"pointer",flexShrink:0}}>
             Installera
           </button>
-          <button onClick={()=>setShowInstallBanner(false)} style={{background:"none",border:"none",color:"rgba(255,255,255,.6)",fontSize:18,cursor:"pointer",padding:"4px",flexShrink:0}}>
+          <button onClick={dismissInstallBanner} style={{background:"none",border:"none",color:"rgba(255,255,255,.6)",fontSize:18,cursor:"pointer",padding:"4px",flexShrink:0}}>
             ✕
           </button>
         </div>
@@ -1218,7 +1240,7 @@ function AppInner() {
 
 
 // ─── Checkout Page ────────────────────────────────────────────────────────────
-function CheckoutPage({ cart, setCart, addToCart, clearCart, items, sales, saveItems, saveSales, currentUser, isAdmin, can, push, pop, toast$, logActivity, customers }) {
+function CheckoutPage({ cart, setCart, addToCart, clearCart, items, sales, saveItems, saveSales, currentUser, isAdmin, can, push, pop, toast$, logActivity, customers, saveCustomers }) {
   const [rows, setRows] = useState(() =>
     cart.map(r => ({ priceMode:"incl", discountMode:"pct", discountPct:0, discountKr:0, ...r, key: r.item.id + "-" + (r.key||Date.now()) }))
   );
@@ -1229,6 +1251,7 @@ function CheckoutPage({ cart, setCart, addToCart, clearCart, items, sales, saveI
     return withCust ? (withCust.customer || withCust.regNumber || "") : "";
   });
   const [customerId, setCustomerId] = useState(null);
+  const [anonymous, setAnonymous] = useState(false);
   const [payMethod, setPayMethod] = useState("kontant"); // kontant | swish | kort
   const [cashGiven, setCashGiven] = useState("");
   const [note, setNote] = useState("");
@@ -1360,8 +1383,25 @@ function CheckoutPage({ cart, setCart, addToCart, clearCart, items, sales, saveI
 
     // Lagret minskar alltid — men om admin valt att INTE registrera köpet
     // hoppar vi över säljloggen och stor-köp-mejlet (intern gratis-utlämning).
+    let finalCustomerId = customerId;
     if (registerSale) {
-      await saveSales([...saleEntries, ...(sales||[])]);
+      // Automatisk kundregistrering — om ett namn angetts men inte redan
+      // kopplat till en befintlig kund (via autokompletteringen), skapas
+      // en ny kundpost automatiskt. Anonyma köp (inget namn alls) skapar
+      // ingen kund — det är precis vad "Anonym"-knappen är till för.
+      const buyerName = buyer.trim();
+      if (buyerName && !anonymous && !finalCustomerId && saveCustomers) {
+        const existingMatch = (customers||[]).find(c => c.name.trim().toLowerCase() === buyerName.toLowerCase());
+        if (existingMatch) {
+          finalCustomerId = existingMatch.id;
+        } else {
+          const newCustomer = { id: genId("cust"), name: buyerName, phone:"", email:"", regNumbers:[], notes:"Skapad automatiskt vid köp", createdAt: Date.now() };
+          await saveCustomers([newCustomer, ...(customers||[])]);
+          finalCustomerId = newCustomer.id;
+        }
+      }
+      const saleEntriesWithCustomer = saleEntries.map(e => ({ ...e, customerId: finalCustomerId||null }));
+      await saveSales([...saleEntriesWithCustomer, ...(sales||[])]);
       logActivity&&logActivity("sale", `Kassaköp: ${saleEntries.reduce((a,e)=>a+e.qty,0)} delar för ${finalTotal.toLocaleString("sv-SE")} kr (${buyer.trim()||"Okänd"})`, { user: currentUser?.username });
       fetch("/admin/api/notify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({type:"large_sale",total:finalTotal,buyer:buyer.trim()||"Okänd",soldBy:currentUser?.username})}).catch(()=>{});
     } else {
@@ -1504,7 +1544,20 @@ function CheckoutPage({ cart, setCart, addToCart, clearCart, items, sales, saveI
         {/* Buyer + Note */}
         {rows.length>0 && (
           <div style={{background:WH,borderRadius:10,border:`1px solid ${BD}`,padding:14,marginBottom:14,display:"flex",flexDirection:"column",gap:10}}>
-            <CustomerPicker customers={customers} value={buyer} onChange={v=>{setBuyer(v);setCustomerId(null);}} onSelectCustomer={c=>{setBuyer(c.name);setCustomerId(c.id);}} label="Kund / köpare (valfritt)"/>
+            {anonymous ? (
+              <div style={{display:"flex",alignItems:"center",gap:10,background:BG,borderRadius:8,padding:"10px 12px"}}>
+                <Icon name="user-secret" style={{color:MU}}/>
+                <span style={{flex:1,fontSize:13,fontWeight:600,color:TM}}>Anonym försäljning — ingen kund registreras</span>
+                <button onClick={()=>{setAnonymous(false);setBuyer("");}} style={{background:"none",border:"none",color:BX,fontWeight:700,fontSize:12,cursor:"pointer"}}>Ångra</button>
+              </div>
+            ) : (
+              <>
+                <CustomerPicker customers={customers} value={buyer} onChange={v=>{setBuyer(v);setCustomerId(null);}} onSelectCustomer={c=>{setBuyer(c.name);setCustomerId(c.id);}} label="Kund / köpare (valfritt)"/>
+                <button onClick={()=>{setAnonymous(true);setBuyer("Privatkund (anonym)");setCustomerId(null);}} style={{alignSelf:"flex-start",background:"none",border:"none",color:MU,fontSize:12,fontWeight:600,cursor:"pointer",padding:0,display:"flex",alignItems:"center",gap:5}}>
+                  <Icon name="user-secret"/> Sälj anonymt (privatkund, ingen registrering)
+                </button>
+              </>
+            )}
             <div>
               <label style={{display:"block",fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:4}}>Notering (valfritt)</label>
               <textarea value={note} onChange={e=>setNote(e.target.value)} rows={2} placeholder="T.ex. fordonsinfo, avtalt pris..."
@@ -4951,7 +5004,7 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
   const clearPF = () => setPickFilters({ cats:[], conds:[], sides:[], make:"", model:"", supplier:"", locationType:"", priceMin:"", priceMax:"" });
 
   const saveMultiReservation = async () => {
-    if (!newForm.regNumber.trim()) { toast$("Ange registreringsnummer","error"); return; }
+    if (!newForm.regNumber.trim() && !newForm.customer.trim()) { toast$("Ange antingen registreringsnummer eller kund (minst ett)","error"); return; }
     if (picked.size===0) { toast$("Välj minst en del","error"); return; }
     const reg = newForm.regNumber.trim().toUpperCase();
     const cust = newForm.customer.trim();
@@ -5258,16 +5311,17 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
             <div style={{background:AM+"16",border:`1px solid ${AM}30`,borderRadius:10,padding:14,marginBottom:14}}>
               <div style={{display:"flex",gap:10,marginBottom:10}}>
                 <div style={{flex:1}}>
-                  <label style={{fontSize:10,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7}}>Regnummer *</label>
+                  <label style={{fontSize:10,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7}}>Regnummer</label>
                   <input value={newForm.regNumber} onChange={e=>setNewForm(f=>({...f,regNumber:formatRegNumber(e.target.value)}))} placeholder="ABC 123" autoFocus
                     style={{width:"100%",border:`1.5px solid ${BD}`,borderRadius:7,padding:"10px 12px",fontSize:15,fontWeight:700,letterSpacing:1,marginTop:4,fontFamily:"monospace",boxSizing:"border-box"}}/>
                 </div>
                 <div style={{flex:1.4}}>
-                  <label style={{fontSize:10,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7}}>Kund (valfritt)</label>
+                  <label style={{fontSize:10,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7}}>Kund</label>
                   <input value={newForm.customer} onChange={e=>setNewForm(f=>({...f,customer:e.target.value}))} placeholder="Namn eller företag"
                     style={{width:"100%",border:`1.5px solid ${BD}`,borderRadius:7,padding:"10px 12px",fontSize:14,marginTop:4,boxSizing:"border-box"}}/>
                 </div>
               </div>
+              <div style={{fontSize:10.5,color:MU,marginTop:-4,marginBottom:4}}>Ange regnummer eller kund — minst ett av dem.</div>
               <input value={newForm.note} onChange={e=>setNewForm(f=>({...f,note:e.target.value}))} placeholder="Notering (valfritt) — gäller alla valda delar"
                 style={{width:"100%",border:`1.5px solid ${BD}`,borderRadius:7,padding:"9px 12px",fontSize:13,boxSizing:"border-box"}}/>
             </div>
@@ -5384,7 +5438,7 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
           </div>
 
           <div style={{background:WH,borderTop:`1px solid ${BD}`,padding:"12px 14px",paddingBottom:"max(12px,env(safe-area-inset-bottom))",boxShadow:"0 -4px 20px rgba(0,0,0,.08)"}}>
-            <Btn full variant="red" onClick={saveMultiReservation} disabled={!newForm.regNumber.trim()||picked.size===0}>
+            <Btn full variant="red" onClick={saveMultiReservation} disabled={(!newForm.regNumber.trim()&&!newForm.customer.trim())||picked.size===0}>
               <Icon name="bookmark"/> Reservera {picked.size} {picked.size===1?"del":"delar"}{newForm.regNumber?` till ${newForm.regNumber}`:""}
             </Btn>
           </div>
@@ -5433,7 +5487,7 @@ function DetailPage({ item: initialItem, items, sales, saveItems, saveSales, add
 
   // ── Reservationer ──────────────────────────────────────────────────────────
   const addReservation = async () => {
-    if (!resForm.regNumber.trim()) { toast$("Ange registreringsnummer","error"); return; }
+    if (!resForm.regNumber.trim() && !resForm.customer.trim()) { toast$("Ange antingen registreringsnummer eller kund (minst ett)","error"); return; }
     if (reservations.length >= (item.quantity||0)) { toast$("Alla exemplar är redan reserverade","error"); return; }
     const newRes = {
       id: genId("res"),
@@ -5851,15 +5905,15 @@ function DetailPage({ item: initialItem, items, sales, saveItems, saveSales, add
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}} onClick={()=>setShowReserve(false)}>
           <div onClick={e=>e.stopPropagation()} style={{background:WH,borderRadius:14,padding:20,maxWidth:380,width:"100%"}}>
             <div style={{fontWeight:800,fontSize:16,marginBottom:4}}>Reservera del</div>
-            <div style={{fontSize:12,color:MU,marginBottom:16}}>Reservera ett exemplar åt en kund. Det skyddas från försäljning tills det säljs till kunden eller av-reserveras.</div>
+            <div style={{fontSize:12,color:MU,marginBottom:16}}>Reservera ett exemplar åt en kund. Det skyddas från försäljning tills det säljs till kunden eller av-reserveras. Ange registreringsnummer eller kund — minst ett av dem.</div>
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
               <div>
-                <label style={{fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7}}>Registreringsnummer *</label>
+                <label style={{fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7}}>Registreringsnummer</label>
                 <input type="text" value={resForm.regNumber} onChange={e=>setResForm(f=>({...f,regNumber:formatRegNumber(e.target.value)}))} placeholder="ABC 123" autoFocus
                   style={{width:"100%",border:`1.5px solid ${BD}`,borderRadius:7,padding:"10px 12px",fontSize:15,fontWeight:700,letterSpacing:1,marginTop:4,fontFamily:"monospace"}}/>
               </div>
               <div>
-                <label style={{fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7}}>Kund (valfritt)</label>
+                <label style={{fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7}}>Kund</label>
                 <input type="text" value={resForm.customer} onChange={e=>setResForm(f=>({...f,customer:e.target.value}))} placeholder="Namn eller företag"
                   style={{width:"100%",border:`1.5px solid ${BD}`,borderRadius:7,padding:"9px 12px",fontSize:14,marginTop:4}}/>
               </div>
@@ -6122,6 +6176,24 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
   const [priceExVat, setPriceExVat] = useState(item && item.price ? String(inclVatToExVat(item.price)) : "");
   const set = (k,v) => setF(p=>({...p,[k]:v}));
   const fRef = useRef(); const cRef = useRef();
+
+  // Laholm får en egen lagernummer-serie (LH1, LH2, …) — helt skild från
+  // den vanliga sifferserien, krockar aldrig. Andra lager (Halmstad m.fl.)
+  // fortsätter med vanliga siffror som innan.
+  const stockPrefixFor = (wh) => wh === "Laholm" ? "LH" : "";
+  // Håller reda på om lagernumret fortfarande är det AUTOMATISKT föreslagna
+  // — bara då räknas det om när man byter lager. Har man redan skrivit in
+  // ett eget nummer för hand rörs det inte.
+  const stockNumberAuto = useRef(!item?.id);
+  const setWarehouse = (wh) => {
+    setF(p => {
+      const next = { ...p, warehouse: wh };
+      if (!item?.id && stockNumberAuto.current) {
+        next.stockNumber = nextAvailableStockNumber(items, trash, stockPrefixFor(wh));
+      }
+      return next;
+    });
+  };
 
   // Snabbtillägg — om KGK-integrationen är påslagen, visa bara de sex
   // fält som verkligen skiljer sig mellan delar; resten hämtas från KGK.
@@ -6391,9 +6463,9 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
 
           <div style={{background:WH,borderRadius:10,border:`1px solid ${BD}`,padding:14,marginBottom:12,display:"flex",flexDirection:"column",gap:12}}>
             <Inp label="Artikelnummer (OEM) *" value={f.oem} onChange={e=>set("oem",e.target.value.toUpperCase())} placeholder="t.ex. 8Y0941034"/>
-            <Inp label="Lagernummer *" value={f.stockNumber} onChange={e=>set("stockNumber",e.target.value)}/>
+            <Inp label="Lagernummer *" value={f.stockNumber} onChange={e=>{stockNumberAuto.current=false;set("stockNumber",e.target.value);}}/>
             {dupStockNumber&&<div style={{background:"rgba(255,107,107,.15)",borderRadius:6,padding:"6px 10px",fontSize:11,fontWeight:700,color:R}}><i className="fa-solid fa-triangle-exclamation"/> {dupStockNumberTrash ? <>Ligger i papperskorgen ({dupStockNumberTrash.name})</> : <>Används redan av {dupStockNumber.name}</>}</div>}
-            <Sel label="Lager (ort) *" value={f.warehouse||""} onChange={e=>set("warehouse",e.target.value)} options={["",...WHS]}/>
+            <Sel label="Lager (ort) *" value={f.warehouse||""} onChange={e=>setWarehouse(e.target.value)} options={["",...WHS]}/>
             <G2>
               <H><Sel label="Placeringstyp" value={f.locationType||""} onChange={e=>set("locationType",e.target.value)} options={["",...LOCTYPES]}/></H>
               <H><Inp label="Placering *" value={f.location} onChange={e=>set("location",e.target.value)} placeholder="Hylla / plats"/></H>
@@ -6445,7 +6517,7 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
             <div style={{display:"flex",gap:8}}>
               <input type="text" value={f.oem} onChange={e=>set("oem",e.target.value.toUpperCase())} placeholder="Artikelnummer *"
                 style={{flex:1,border:`1.5px solid ${(!f.oem?.trim()||dupOem)?"#FF6B6B":"rgba(255,255,255,.3)"}`,borderRadius:7,padding:"9px 12px",fontSize:13,fontWeight:600,color:WH,background:"rgba(255,255,255,.12)"}}/>
-              <input type="text" value={f.stockNumber||""} onChange={e=>set("stockNumber",e.target.value)} placeholder="Lagernr *"
+              <input type="text" value={f.stockNumber||""} onChange={e=>{stockNumberAuto.current=false;set("stockNumber",e.target.value);}} placeholder="Lagernr *"
                 style={{width:100,border:`1.5px solid ${(!f.stockNumber?.trim()||dupStockNumber)?"#FF6B6B":"rgba(255,255,255,.3)"}`,borderRadius:7,padding:"9px 12px",fontSize:13,fontWeight:800,color:WH,background:"rgba(255,255,255,.12)",textAlign:"center"}}/>
             </div>
             <div style={{display:"flex",gap:8}}>
@@ -6456,7 +6528,7 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
               <input type="text" value={f.location} onChange={e=>set("location",e.target.value)} placeholder="Placering *"
                 style={{flex:1,border:`1.5px solid ${!f.location?.trim()?"#FF6B6B":"rgba(255,255,255,.3)"}`,borderRadius:7,padding:"9px 12px",fontSize:13,fontWeight:600,color:WH,background:"rgba(255,255,255,.12)"}}/>
             </div>
-            <select value={f.warehouse||""} onChange={e=>set("warehouse",e.target.value)}
+            <select value={f.warehouse||""} onChange={e=>setWarehouse(e.target.value)}
               style={{width:"100%",border:`1.5px solid ${!f.warehouse?.trim()?"#FF6B6B":"rgba(255,255,255,.3)"}`,borderRadius:7,padding:"9px 10px",fontSize:13,fontWeight:600,color:WH,background:"rgba(255,255,255,.15)"}}>
               <option value="" style={{background:"#1B3A6B",color:WH}}>Vilket lager (ort)? *</option>
               {WHS.map(w=><option key={w} value={w} style={{background:"#1B3A6B",color:WH}}>{w}</option>)}
@@ -6557,11 +6629,12 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
 }
 
 // ─── Sell Page ────────────────────────────────────────────────────────────────
-function SellPage({ item, items, sales, saveItems, saveSales, currentUser, push, pop, toast$, maxQty, presetBuyer, logActivity, isAdmin, customers }) {
+function SellPage({ item, items, sales, saveItems, saveSales, currentUser, push, pop, toast$, maxQty, presetBuyer, logActivity, isAdmin, customers, saveCustomers }) {
   const cap = maxQty != null ? maxQty : (item.quantity || 0);
   const [qty, setQty] = useState(1);
   const [buyer, setBuyer] = useState(presetBuyer || "");
   const [customerId, setCustomerId] = useState(null);
+  const [anonymous, setAnonymous] = useState(false);
   // Admin kan välja att INTE registrera försäljningen i säljloggen (intern utlämning)
   const [registerSale, setRegisterSale] = useState(true);
   const VAT_RATE = 0.25; // 25% moms
@@ -6691,7 +6764,20 @@ function SellPage({ item, items, sales, saveItems, saveSales, currentUser, push,
       else await saveItems(items.map(i=>i.id===item.id?updatedItem:i));
     }
     if (registerSale) {
-      await saveSales([saleEntry,...(sales||[])]);
+      // Automatisk kundregistrering — samma logik som i Kassan.
+      const buyerName = buyer?.trim() || presetBuyer?.trim() || "";
+      let finalCustomerId = customerId;
+      if (buyerName && !anonymous && !finalCustomerId && saveCustomers) {
+        const existingMatch = (customers||[]).find(c => c.name.trim().toLowerCase() === buyerName.toLowerCase());
+        if (existingMatch) {
+          finalCustomerId = existingMatch.id;
+        } else {
+          const newCustomer = { id: genId("cust"), name: buyerName, phone:"", email:"", regNumbers:[], notes:"Skapad automatiskt vid köp", createdAt: Date.now() };
+          await saveCustomers([newCustomer, ...(customers||[])]);
+          finalCustomerId = newCustomer.id;
+        }
+      }
+      await saveSales([{...saleEntry, customerId: finalCustomerId||null},...(sales||[])]);
       logActivity&&logActivity("sale", `Sålde ${qty} × ${item.name}${item.stockNumber?` (#${item.stockNumber})`:""} för ${total.toLocaleString("sv-SE")} kr`, { user: currentUser?.username, itemName:item.name, stockNumber:item.stockNumber });
       fetch("/admin/api/notify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({type:"large_sale",total,buyer:buyer?.trim()||presetBuyer||"Okänd",soldBy:currentUser?.username})}).catch(()=>{});
       toast$(`Sålde ${qty} × ${item.name} — ${total.toLocaleString("sv-SE")} kr`,"success");
@@ -6793,7 +6879,20 @@ function SellPage({ item, items, sales, saveItems, saveSales, currentUser, push,
             )}
           </div>
 
-          <CustomerPicker customers={customers} value={buyer} onChange={v=>{setBuyer(v);setCustomerId(null);}} onSelectCustomer={c=>{setBuyer(c.name);setCustomerId(c.id);}}/>
+          {anonymous ? (
+            <div style={{display:"flex",alignItems:"center",gap:10,background:BG,borderRadius:8,padding:"10px 12px"}}>
+              <Icon name="user-secret" style={{color:MU}}/>
+              <span style={{flex:1,fontSize:13,fontWeight:600,color:TM}}>Anonym försäljning — ingen kund registreras</span>
+              <button onClick={()=>{setAnonymous(false);setBuyer("");}} style={{background:"none",border:"none",color:BX,fontWeight:700,fontSize:12,cursor:"pointer"}}>Ångra</button>
+            </div>
+          ) : (
+            <>
+              <CustomerPicker customers={customers} value={buyer} onChange={v=>{setBuyer(v);setCustomerId(null);}} onSelectCustomer={c=>{setBuyer(c.name);setCustomerId(c.id);}}/>
+              <button onClick={()=>{setAnonymous(true);setBuyer("Privatkund (anonym)");setCustomerId(null);}} style={{alignSelf:"flex-start",background:"none",border:"none",color:MU,fontSize:12,fontWeight:600,cursor:"pointer",padding:0,display:"flex",alignItems:"center",gap:5}}>
+                <Icon name="user-secret"/> Sälj anonymt (privatkund, ingen registrering)
+              </button>
+            </>
+          )}
           <div>
             <label style={{display:"block",fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:4}}>Notering</label>
             <textarea value={note} onChange={e=>setNote(e.target.value)} rows={2} placeholder="Valfri kommentar..." style={{width:"100%",border:`1.5px solid ${BD}`,borderRadius:6,padding:"9px 12px",fontSize:13,resize:"none",fontFamily:"inherit",color:TX}}/>
