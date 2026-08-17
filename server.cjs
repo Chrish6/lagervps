@@ -146,23 +146,31 @@ app.use(express.json({ limit: "500mb" }));
 app.use(express.urlencoded({ limit: "500mb", extended: true }));
 
 // ── Skydd för admin-panelen (den separata sidan på /admin) ─────────────────
-// Panelen visar bland annat vilka enheter/IP-adresser som är anslutna och
-// låter dig starta om servern eller trigga en backup. Skyddet är nu
-// kopplat till HUVUDSYSTEMETS riktiga inloggning — varje åtgärd i panelen
-// kräver ett riktigt, inloggat admin-konto (samma sessionstoken-system som
-// resten av appen), inte bara ett delat lösenord. /admin-sidan visar en
-// egen inloggningsruta i sitt JS om ingen giltig token finns sparad.
-// /admin/api/healthcheck undantas medvetet — byggd för externa
-// övervakningsverktyg (t.ex. n8n), skyddas redan separat av
-// HEALTHCHECK_TOKEN.
-// ADMIN_PANEL_PASSWORD är ett VALFRITT extra lager bara för att ladda
-// själva sidan (ett delat lösenord, webbläsarens inbyggda Basic Auth) —
-// utöver det krävs alltid ett riktigt admin-konto för att faktiskt göra
-// något i panelen. Sätts inget lösenord laddas sidan fritt, som innan.
+// Tre nivåer av skydd under /admin/api/*, inte bara två:
+//   1. HELT ÖPPET — /admin/api/healthcheck (externa övervakningsverktyg,
+//      skyddas separat av HEALTHCHECK_TOKEN) och /admin/api/notify (måste
+//      kunna nås även INNAN någon loggat in — t.ex. ett mejl vid en
+//      misslyckad inloggning, då finns ingen sessionstoken alls än).
+//   2. KRÄVER INLOGGNING (vilken roll som helst) — saker som triggas av
+//      vanliga, inloggade användares normala handlingar: en notis vid
+//      försäljning, en KGK-slagning, ett testmejl. De ska inte kräva
+//      adminbehörighet bara för att de råkar ligga under /admin/api/.
+//   3. KRÄVER ADMINROLL — själva adminpanelens instrumentpanel (status,
+//      enheter, omstart, backup-nu) — det här är den känsliga delen.
 const ADMIN_PANEL_PASSWORD = process.env.ADMIN_PANEL_PASSWORD || null;
+const ADMIN_FULLY_PUBLIC = new Set(["/admin/api/healthcheck", "/admin/api/notify"]);
+const ADMIN_LOGIN_ONLY = new Set([
+  "/admin/api/event",
+  "/admin/api/notify-warehouse-reservation",
+  "/admin/api/kgk/test",
+  "/admin/api/kgk/lookup",
+  "/admin/api/kgk/notify-not-found",
+  "/admin/api/email-test",
+  "/admin/api/backup-cloud/test",
+]);
 app.use(async (req, res, next) => {
   if (!req.path.startsWith("/admin")) return next();
-  if (req.path === "/admin/api/healthcheck") return next();
+  if (ADMIN_FULLY_PUBLIC.has(req.path)) return next();
 
   if (req.path === "/admin") {
     if (ADMIN_PANEL_PASSWORD) {
@@ -177,13 +185,18 @@ app.use(async (req, res, next) => {
     return next();
   }
 
-  // Alla /admin/api/*-anrop (utom healthcheck ovan) kräver ett riktigt,
-  // inloggat admin-konto — knyter varje åtgärd till en identifierad
-  // person, inte ett delat lösenord.
   try {
     const token = (req.headers.authorization || "").replace("Bearer ", "");
     const username = await getSessionUser(token);
     if (!username) return res.status(401).json({ ok:false, error:"Inte inloggad." });
+
+    // Nivå 2 — inloggad räcker, adminroll krävs inte
+    if (ADMIN_LOGIN_ONLY.has(req.path)) {
+      req.authUsername = username;
+      return next();
+    }
+
+    // Nivå 3 — resten av /admin/api/* kräver faktisk adminroll
     const usersRow = await dbGet("ow:users");
     const usersArr = usersRow ? JSON.parse(usersRow.value) : [];
     const u = usersArr.find(x=>x.username===username);
@@ -430,6 +443,12 @@ app.post("/api/logout", async (req, res) => {
 app.use(async (req, res, next) => {
   if (!req.path.startsWith("/api/")) return next();
   if (PUBLIC_PATHS.has(req.path)) return next();
+  // /api/img/* undantas medvetet — de laddas via vanliga <img src="...">-
+  // taggar i sidan, och webbläsaren kan tekniskt inte bifoga en
+  // inloggningstoken till den typen av bildförfrågan (till skillnad från
+  // fetch(), som kan sätta egna headers). Bilder på bildelar är dessutom
+  // inte känslig information på samma sätt som resten av datan.
+  if (req.path.startsWith("/api/img/")) return next();
   // Undantag: ALLRA FÖRSTA skrivningen till ow:users (skapar admin-kontot
   // vid en helt ny installation) måste kunna ske innan någon är inloggad —
   // annars kan appen aldrig komma igång. Bara tillåtet om inga användare
@@ -592,6 +611,25 @@ app.post("/api/restore", async (req, res) => {
     }
     const combined = existing.concat(lightItems);
 
+    // SKYDD: backup-filer innehåller ALDRIG riktiga lösenord (de tas
+    // medvetet bort vid export, av samma anledning som webbläsaren aldrig
+    // får se lösenordshashar). Skriver vi över ow:users rakt av med det
+    // skulle varje användares lösenord försvinna vid en återställning på
+    // en miljö som redan har riktiga konton. Bevara därför befintlig hash
+    // för varje användarnamn som redan finns, om den inkommande posten
+    // saknar lösenord.
+    let usersToWrite = users;
+    if (users) {
+      const existingUsersRow = await dbGet("ow:users");
+      const existingUsers = existingUsersRow ? JSON.parse(existingUsersRow.value) : [];
+      const byUsername = new Map(existingUsers.map(u => [u.username, u]));
+      usersToWrite = users.map(u => {
+        if (u.password) return u; // backupen hade faktiskt ett lösenord — använd det
+        const prev = byUsername.get(u.username);
+        return { ...u, password: prev?.password }; // annars, bevara befintligt om det finns
+      });
+    }
+
     await new Promise((resolve, reject) => {
       db.serialize(() => {
         db.run("BEGIN TRANSACTION");
@@ -601,7 +639,7 @@ app.post("/api/restore", async (req, res) => {
         stmt.finalize();
         db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:items',?,strftime('%s','now'))", [JSON.stringify(combined)]);
         if (sales) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:sales',?,strftime('%s','now'))", [JSON.stringify(sales)]);
-        if (users) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:users',?,strftime('%s','now'))", [JSON.stringify(users)]);
+        if (users) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:users',?,strftime('%s','now'))", [JSON.stringify(usersToWrite)]);
         if (settings) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:settings',?,strftime('%s','now'))", [JSON.stringify(settings)]);
         if (suppliers && suppliers.length) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:suppliers',?,strftime('%s','now'))", [JSON.stringify(suppliers)]);
         if (roles) db.run("INSERT OR REPLACE INTO store(key,value,updated_at) VALUES('ow:roles',?,strftime('%s','now'))", [JSON.stringify(roles)]);
