@@ -117,6 +117,21 @@ describe("nextAvailableStockNumber — nästa lediga lagernummer", () => {
     const items = [{ stockNumber: "" }, { stockNumber: "abc" }, { stockNumber: null }];
     assert.equal(nextAvailableStockNumber(items, []), "1");
   });
+  test("med prefix (t.ex. Laholm) — börjar på LH1", () => {
+    assert.equal(nextAvailableStockNumber([], [], "LH"), "LH1");
+  });
+  test("med prefix — hoppar över upptagna LH-nummer i tur och ordning", () => {
+    const items = [{ stockNumber: "LH1" }, { stockNumber: "LH2" }];
+    assert.equal(nextAvailableStockNumber(items, [], "LH"), "LH3");
+  });
+  test("med prefix — de två serierna (vanlig/LH) krockar aldrig, oavsett vilka vanliga nummer som finns", () => {
+    const items = [{ stockNumber: "1" }, { stockNumber: "2" }, { stockNumber: "3" }];
+    assert.equal(nextAvailableStockNumber(items, [], "LH"), "LH1");
+  });
+  test("med prefix — fyller i en lucka i LH-sekvensen", () => {
+    const items = [{ stockNumber: "LH1" }, { stockNumber: "LH3" }];
+    assert.equal(nextAvailableStockNumber(items, [], "LH"), "LH2");
+  });
 });
 
 describe("checkStockNumberTaken — kollisionskontroll", () => {
