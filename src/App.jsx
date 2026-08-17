@@ -59,7 +59,7 @@ function reportEvent(type, description) {
   try {
     fetch(`/admin/api/event`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ type, description, user: CURRENT_USERNAME }),
     }).catch(()=>{});
   } catch {}
@@ -3518,7 +3518,7 @@ function BackupPage({ items, sales, users, settings, suppliers, roles, lists, ac
     if (!cloudRemote.trim()) { toast$("Fyll i fjärrens namn först","error"); return; }
     setCloudTesting(true);
     try {
-      const r = await fetch("/admin/api/backup-cloud/test", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ remote: cloudRemote.trim() }) }).then(r=>r.json());
+      const r = await fetch("/admin/api/backup-cloud/test", { method:"POST", headers: authHeaders({"Content-Type":"application/json"}), body: JSON.stringify({ remote: cloudRemote.trim() }) }).then(r=>r.json());
       toast$(r.ok ? (r.message||"Anslutningen fungerar") : (r.error||"Kunde inte ansluta"), r.ok?"success":"error");
     } catch { toast$("Kunde inte nå servern","error"); }
     setCloudTesting(false);
@@ -6268,7 +6268,7 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
     let kgkFields = {};
     try {
       const r = await fetch("/admin/api/kgk/lookup", {
-        method:"POST", headers:{"Content-Type":"application/json"},
+        method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
         body: JSON.stringify({ oem: f.oem })
       }).then(r=>r.json());
       if (r.ok && r.found) {
@@ -7443,7 +7443,7 @@ function KgkPage({ items, saveItems, isAdmin, can, pop, toast$ }) {
     setTesting(true);
     await save(); // spara innan test så servern har senaste uppgifterna
     try {
-      const r = await fetch("/admin/api/kgk/test", { method:"POST" }).then(r=>r.json());
+      const r = await fetch("/admin/api/kgk/test", { method:"POST", headers: authHeaders() }).then(r=>r.json());
       toast$(r.ok ? (r.message||"Anslutning fungerar") : (r.error||"Kunde inte ansluta"), r.ok?"success":"error");
     } catch { toast$("Kunde inte nå servern","error"); }
     setTesting(false);
@@ -7465,7 +7465,7 @@ function KgkPage({ items, saveItems, isAdmin, can, pop, toast$ }) {
       const item = working[i];
       try {
         const r = await fetch("/admin/api/kgk/lookup", {
-          method:"POST", headers:{"Content-Type":"application/json"},
+          method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
           body: JSON.stringify({ oem:item.oem, sku:item.sku, name:item.name })
         }).then(r=>r.json());
 
@@ -7510,7 +7510,7 @@ function KgkPage({ items, saveItems, isAdmin, can, pop, toast$ }) {
     // (kanske ett felskrivet artikelnummer, eller så finns delen inte hos KGK).
     if (notFoundList.length > 0) {
       fetch("/admin/api/kgk/notify-not-found", {
-        method:"POST", headers:{"Content-Type":"application/json"},
+        method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
         body: JSON.stringify({ items: notFoundList })
       }).catch(()=>{});
     }
@@ -7628,7 +7628,7 @@ function EmailNotifyPage({ isAdmin, can, pop, toast$ }) {
   const sendTest = async () => {
     setTesting(true);
     try {
-      const r = await fetch("/admin/api/email-test").then(r=>r.json());
+      const r = await fetch("/admin/api/email-test", { headers: authHeaders() }).then(r=>r.json());
       if (r.ok) toast$("Testmejl skickat — kolla din inkorg","success");
       else toast$(r.error || "Kunde inte skicka","error");
     } catch { toast$("Kunde inte nå servern","error"); }
