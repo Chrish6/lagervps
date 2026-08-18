@@ -1136,6 +1136,22 @@ function AppInner() {
   );
 
   const currentUser = (session && Array.isArray(users)) ? users.find(u=>u.id===session) : null;
+
+  // Skydd mot en "föräldralös" session — en sparad inloggning (användar-id)
+  // som inte längre matchar NÅGON befintlig användare (t.ex. efter en
+  // nödåterställning som bytte ut kontona). Token är fortfarande giltig
+  // (inga 401 alls), så onSessionExpired triggas aldrig av sig själv i det
+  // här fallet — måste upptäckas separat, annars blir man stående på en
+  // låst sida utan förklaring istället för att skickas till inloggning.
+  useEffect(() => {
+    if (loaded && session && Array.isArray(users) && users.length>0 && !users.some(u=>u.id===session)) {
+      clearSession();
+      setCurrentToken(null);
+      setSession(null);
+      setStack([{ name:"login" }]);
+      toast$("Din inloggning kunde inte hittas — logga in igen","error");
+    }
+  }, [loaded, session, users]);
   const isAdmin = currentUser?.role === "admin";
   // Huvudadmin = admin utan tilldelat hemmalager — obegränsad, som idag.
   // Platsadmin = admin MED ett tilldelat hemmalager — full adminrätt, men
