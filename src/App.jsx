@@ -1127,22 +1127,15 @@ function AppInner() {
     return () => window.removeEventListener("keydown", onKey);
   }, [current?.name]);
 
-  if (!loaded) return (
-    <div style={{minHeight:"100vh",background:BG,display:"flex",alignItems:"center",justifyContent:"center"}}>
-      <style>{CSS}</style>
-      <div style={{width:32,height:32,border:`3px solid ${BD}`,borderTopColor:BX,borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-    </div>
-  );
-
-  const currentUser = (session && Array.isArray(users)) ? users.find(u=>u.id===session) : null;
-
   // Skydd mot en "föräldralös" session — en sparad inloggning (användar-id)
   // som inte längre matchar NÅGON befintlig användare (t.ex. efter en
   // nödåterställning som bytte ut kontona). Token är fortfarande giltig
   // (inga 401 alls), så onSessionExpired triggas aldrig av sig själv i det
   // här fallet — måste upptäckas separat, annars blir man stående på en
   // låst sida utan förklaring istället för att skickas till inloggning.
+  // VIKTIGT: måste stå FÖRE "if (!loaded) return" nedan — hooks får aldrig
+  // hamna efter ett villkorligt return, annars körs de inte varje gång i
+  // samma ordning (Reacts regler för hooks), vilket kraschar hela appen.
   useEffect(() => {
     if (loaded && session && Array.isArray(users) && users.length>0 && !users.some(u=>u.id===session)) {
       clearSession();
@@ -1152,6 +1145,16 @@ function AppInner() {
       toast$("Din inloggning kunde inte hittas — logga in igen","error");
     }
   }, [loaded, session, users]);
+
+  if (!loaded) return (
+    <div style={{minHeight:"100vh",background:BG,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <style>{CSS}</style>
+      <div style={{width:32,height:32,border:`3px solid ${BD}`,borderTopColor:BX,borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+
+  const currentUser = (session && Array.isArray(users)) ? users.find(u=>u.id===session) : null;
   const isAdmin = currentUser?.role === "admin";
   // Huvudadmin = admin utan tilldelat hemmalager — obegränsad, som idag.
   // Platsadmin = admin MED ett tilldelat hemmalager — full adminrätt, men
