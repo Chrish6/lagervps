@@ -655,7 +655,7 @@ function useIsMobile() {
 }
 
 // ─── Desktop Sidebar ──────────────────────────────────────────────────────────
-function Sidebar({ currentUser, isAdmin, can, push, currentPage, stack, setSession, toast$, cart, settings, trash }) {
+function Sidebar({ currentUser, isAdmin, can, push, replace, currentPage, stack, setSession, toast$, cart, settings, trash }) {
   const cartCount = (cart||[]).reduce((a,r)=>a+r.qty,0);
   const [netInfo, setNetInfo] = useState(null);
 
@@ -764,7 +764,7 @@ function Sidebar({ currentUser, isAdmin, can, push, currentPage, stack, setSessi
             <Icon name="user-gear" style={{fontSize:14,color:MU}}/>
             Min profil
           </button>
-          <button onClick={()=>{doLogout();setSession(null);toast$("Utloggad");push("inventory");}}
+          <button onClick={()=>{doLogout();setSession(null);toast$("Utloggad");replace("login");}}
             style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"9px 10px",borderRadius:8,border:"none",background:"transparent",color:R,fontWeight:500,fontSize:13,cursor:"pointer"}}>
             <Icon name="right-from-bracket" style={{fontSize:14,color:R}}/>
             Logga ut
@@ -853,7 +853,7 @@ function AppInner() {
   const [sortPref, setSortPref] = useState({ by:"stockNumber", dir:"asc" });
   const applyFilters = useCallback(f => setFilters(f), []);
   // page stack: each entry = { name, props }
-  const [stack, setStack] = useState([{ name:"inventory" }]);
+  const [stack, setStack] = useState(() => loadSession() ? [{ name:"inventory" }] : [{ name:"login" }]);
   const push = (name, props={}) => setStack(s => [...s, { name, props }]);
   const pop  = () => setStack(s => s.length > 1 ? s.slice(0,-1) : s);
   const replace = (name, props={}) => setStack(s => [...s.slice(0,-1), { name, props }]);
@@ -1136,7 +1136,7 @@ function AppInner() {
   const isFullAdmin = isAdmin && !currentUser?.homeWarehouse;
   const isPlatsAdmin = isAdmin && !!currentUser?.homeWarehouse;
   const can = p => {
-    if (!currentUser) return p==="canView";
+    if (!currentUser) return false; // Inget gästläge — utan inloggning finns ingen behörighet alls
     if (isAdmin) return true;
     // Behörighet från rollen (om användaren har en roll) + ev. egna extra behörigheter
     const role = currentUser.roleId ? roles.find(r => r.id === currentUser.roleId) : null;
@@ -1191,7 +1191,7 @@ function AppInner() {
         {/* Desktop sidebar */}
         {showSidebar && (
           <div style={{width:220,flexShrink:0,background:WH,borderRight:`1px solid ${BD}`,overflowY:"auto"}}>
-            <Sidebar currentUser={currentUser} isAdmin={isAdmin} can={can} push={name=>push(name)} currentPage={current.name} stack={stack} setSession={setSession} toast$={toast$} cart={cart} settings={settings} trash={trash}/>
+            <Sidebar currentUser={currentUser} isAdmin={isAdmin} can={can} push={name=>push(name)} replace={replace} currentPage={current.name} stack={stack} setSession={setSession} toast$={toast$} cart={cart} settings={settings} trash={trash}/>
           </div>
         )}
 
@@ -1222,6 +1222,8 @@ function AppInner() {
           {current.name === "receipt"      && <ReceiptPage      {...sharedProps} {...current.props} />}
           {current.name === "qrlabels"     && <QrLabelsPage     {...sharedProps} {...current.props} />}
           {current.name === "locationview"  && <LocationViewPage {...sharedProps} {...current.props} />}
+          {current.name === "nolocation"    && <NoLocationPage    {...sharedProps} />}
+          {current.name === "missingitems"  && <MissingItemsPage  {...sharedProps} />}
           {current.name === "import"       && <ImportPage       {...sharedProps} />}
           {current.name === "variants"     && <VariantsPage     {...sharedProps} {...current.props} />}
           {current.name === "reports"      && <ReportsPage      {...sharedProps} />}
@@ -1679,8 +1681,13 @@ function ScanPage({ items, push, pop, toast$ }) {
   const [scanning, setScanning] = useState(false);
   const [lastResult, setLastResult] = useState(null);
   const [cameraError, setCameraError] = useState(null);
+  const [continuous, setContinuous] = useState(true);
+  const [recentScans, setRecentScans] = useState([]);
+  const [devices, setDevices] = useState([]);
+  const [deviceIdx, setDeviceIdx] = useState(0);
   const videoRef = useRef(null);
   const readerRef = useRef(null);
+  const lastScanRef = useRef({ code: null, ts: 0 });
 
   useEffect(() => {
     return () => { stopCamera(); };
@@ -1695,7 +1702,24 @@ function ScanPage({ items, push, pop, toast$ }) {
     document.head.appendChild(s);
   });
 
-  const startCamera = async () => {
+  // Kort pip + vibration vid en lyckad skanning — ger tydlig återkoppling
+  // utan att behöva titta på skärmen hela tiden (praktiskt när man skannar
+  // många delar i rad, t.ex. vid en inventering).
+  const beep = () => {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+      osc.start(); osc.stop(ctx.currentTime + 0.15);
+    } catch {}
+    if (navigator.vibrate) navigator.vibrate(80);
+  };
+
+  const startCamera = async (chosenDeviceId) => {
     setCameraError(null);
     if (!navigator.mediaDevices?.getUserMedia) {
       setCameraError("Webbläsaren saknar kamerastöd. Kräver HTTPS eller localhost.");
@@ -1708,11 +1732,26 @@ function ScanPage({ items, push, pop, toast$ }) {
       const reader = new ZXing.BrowserMultiFormatReader(hints);
       readerRef.current = reader;
       setScanning(true);
-      await reader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
-        if (result) {
-          lookup(result.getText());
-          stopCamera();
-        }
+
+      // Lista tillgängliga kameror (för växlingsknappen) — bara första gången
+      if (devices.length === 0) {
+        try {
+          const cams = await ZXing.BrowserMultiFormatReader.listVideoInputDevices();
+          setDevices(cams);
+        } catch {}
+      }
+
+      await reader.decodeFromVideoDevice(chosenDeviceId || null, videoRef.current, (result) => {
+        if (!result) return;
+        const code = result.getText();
+        const now = Date.now();
+        // Undvik att samma kod triggar flera gånger i rad om kameran ligger
+        // still riktad mot samma etikett en stund
+        if (lastScanRef.current.code === code && now - lastScanRef.current.ts < 2500) return;
+        lastScanRef.current = { code, ts: now };
+        beep();
+        lookup(code);
+        if (!continuous) stopCamera();
       });
     } catch (err) {
       let msg = "Kunde inte starta kameran.";
@@ -1724,6 +1763,14 @@ function ScanPage({ items, push, pop, toast$ }) {
       setScanning(false);
       toast$(msg,"error");
     }
+  };
+
+  const switchCamera = () => {
+    if (devices.length < 2) return;
+    const nextIdx = (deviceIdx + 1) % devices.length;
+    setDeviceIdx(nextIdx);
+    stopCamera();
+    setTimeout(() => startCamera(devices[nextIdx].deviceId), 200);
   };
 
   const stopCamera = () => {
@@ -1745,15 +1792,19 @@ function ScanPage({ items, push, pop, toast$ }) {
       push("locationview", { initialExpand: loc });
       return;
     }
-    const matches = items.filter(i => i.oem===c || i.stockNumber===c || i.sku===c || i.id===c);
+    // Lagernummer prioriteras — det är alltid unikt (artikelnummer kan
+    // finnas på flera identiska delar, t.ex. 5 likadana stötfångare)
+    const matches = items.filter(i => i.stockNumber===c || i.oem===c || i.sku===c || i.id===c || i.alternativeNumbers?.includes(c));
     if (matches.length === 0) {
       setLastResult(null);
       toast$(`Ingen artikel matchade: ${c}`,"error");
     } else if (matches.length > 1) {
       toast$(`Hittade ${matches.length} exemplar`,"success");
+      setRecentScans(r => [{ code:c, name: matches[0].name, count: matches.length, ts: Date.now() }, ...r].slice(0,8));
       push("variants", {sku: matches[0].sku});
     } else {
       setLastResult(matches[0]);
+      setRecentScans(r => [{ code:c, name: matches[0].name, count: 1, ts: Date.now() }, ...r].slice(0,8));
       toast$(`Hittade: ${matches[0].name}`,"success");
     }
   };
@@ -1775,6 +1826,11 @@ function ScanPage({ items, push, pop, toast$ }) {
               <video ref={videoRef} autoPlay playsInline muted style={{width:"100%",height:"100%",objectFit:"cover"}}/>
               <div style={{position:"absolute",top:"50%",left:"50%",transform:"translate(-50%,-50%)",width:"70%",height:"35%",border:`3px solid ${BX}`,borderRadius:8,boxShadow:"0 0 0 9999px rgba(0,0,0,.3)"}}/>
               <div style={{position:"absolute",bottom:12,left:0,right:0,textAlign:"center",color:"#fff",fontSize:12,fontWeight:600}}>Rikta mot QR-kod eller streckkod</div>
+              {devices.length>1&&(
+                <button onClick={switchCamera} style={{position:"absolute",top:10,right:10,background:"rgba(0,0,0,.5)",border:"none",borderRadius:8,padding:"8px 10px",color:"#fff",cursor:"pointer"}}>
+                  <Icon name="camera-rotate"/>
+                </button>
+              )}
             </div>
           ):(
             <div style={{padding:40,textAlign:"center"}}>
@@ -1783,7 +1839,7 @@ function ScanPage({ items, push, pop, toast$ }) {
                 <Icon name="barcode" style={{fontSize:40,color:BD}}/>
               </div>
               <div style={{fontSize:13,color:MU,marginBottom:16}}>Starta kameran för att skanna QR-kod eller streckkod (EAN, UPC, Code128 m.fl.)</div>
-              <Btn onClick={startCamera}><Icon name="camera"/> Starta kamera</Btn>
+              <Btn onClick={()=>startCamera()}><Icon name="camera"/> Starta kamera</Btn>
               {cameraError&&(
                 <div style={{marginTop:14,background:R+"10",border:`1px solid ${R}30`,borderRadius:8,padding:"10px 12px",fontSize:12,color:R,textAlign:"left"}}>
                   <i className="fa-solid fa-triangle-exclamation" style={{marginRight:6}}/>{cameraError}
@@ -1793,7 +1849,14 @@ function ScanPage({ items, push, pop, toast$ }) {
           )}
         </div>
 
-        {scanning&&<Btn full variant="ghost" onClick={stopCamera} style={{marginBottom:14}}>Stäng kamera</Btn>}
+        {scanning&&(
+          <div style={{display:"flex",gap:8,marginBottom:14}}>
+            <Btn full variant="ghost" onClick={stopCamera}>Stäng kamera</Btn>
+            <button onClick={()=>setContinuous(c=>!c)} style={{display:"flex",alignItems:"center",gap:8,padding:"0 14px",border:`1.5px solid ${continuous?BX:BD}`,borderRadius:8,background:continuous?BX+"10":WH,color:continuous?BX:MU,fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              <Icon name={continuous?"toggle-on":"toggle-off"}/> Fortsätt skanna
+            </button>
+          </div>
+        )}
 
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
           <div style={{flex:1,height:1,background:BD}}/>
@@ -1807,7 +1870,7 @@ function ScanPage({ items, push, pop, toast$ }) {
         </div>
 
         {lastResult&&(
-          <div onClick={()=>push("detail",{item:lastResult})} style={{background:GR+"10",border:`1px solid ${GR}30`,borderRadius:10,padding:14,cursor:"pointer"}}>
+          <div onClick={()=>push("detail",{item:lastResult})} style={{background:GR+"10",border:`1px solid ${GR}30`,borderRadius:10,padding:14,cursor:"pointer",marginBottom:14}}>
             <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6}}>
               <Icon name="check" style={{color:GR}}/>
               <span style={{fontSize:11,fontWeight:700,color:GR,textTransform:"uppercase"}}>Hittad artikel</span>
@@ -1817,15 +1880,36 @@ function ScanPage({ items, push, pop, toast$ }) {
             <div style={{fontSize:12,color:BX,fontWeight:600,marginTop:6}}>Tryck för att öppna →</div>
           </div>
         )}
+
+        {recentScans.length>0&&(
+          <div>
+            <div style={{fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:8}}>Senaste skanningarna denna session</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {recentScans.map((r,idx)=>(
+                <div key={idx} style={{display:"flex",alignItems:"center",gap:10,background:WH,border:`1px solid ${BD}`,borderRadius:8,padding:"8px 12px"}}>
+                  <Icon name="qrcode" style={{color:MU,fontSize:13}}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:12.5,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.name}{r.count>1?` (${r.count} exemplar)`:""}</div>
+                  </div>
+                  <span style={{fontSize:10,color:MU}}>{new Date(r.ts).toLocaleTimeString("sv-SE",{hour:"2-digit",minute:"2-digit"})}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </Page>
   );
 }
 
 // ─── Location View Page ────────────────────────────────────────────────────────
-function LocationViewPage({ items, pop, push, can, isAdmin, initialExpand }) {
+function LocationViewPage({ items, saveItems, lists, pop, push, can, isAdmin, toast$, initialExpand }) {
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState(initialExpand || null);
+  const [movingId, setMovingId] = useState(null); // vilken del som just nu visar flytt-panelen
+  const [moveType, setMoveType] = useState("");
+  const [moveLoc, setMoveLoc] = useState("");
+  const [confirmDeleteLoc, setConfirmDeleteLoc] = useState(null);
 
   const locations = [...new Set(
     items.map(i => [i.locationType, i.location].filter(Boolean).join(" — ")).filter(Boolean)
@@ -1833,6 +1917,30 @@ function LocationViewPage({ items, pop, push, can, isAdmin, initialExpand }) {
 
   const filtered = locations.filter(l => !search || l.toLowerCase().includes(search.toLowerCase()));
   const getItems = (loc) => items.filter(i => [i.locationType, i.location].filter(Boolean).join(" — ") === loc);
+  const noLocationCount = items.filter(i => !i.location).length;
+  const missingCount = items.filter(i => i.missing).length;
+
+  const startMove = (item) => {
+    setMovingId(item.id);
+    setMoveType(item.locationType||"");
+    setMoveLoc(item.location||"");
+  };
+  const cancelMove = () => { setMovingId(null); setMoveType(""); setMoveLoc(""); };
+  const confirmMove = async (item) => {
+    await saveItems(items.map(i => i.id===item.id ? {...i, locationType:moveType, location:moveLoc} : i));
+    toast$(`${item.name} flyttad till ${[moveType,moveLoc].filter(Boolean).join(" — ")||"ingen plats"}`,"success");
+    cancelMove();
+  };
+
+  // Ta bort en plats — rensar location/locationType på ALLA delar som finns
+  // där just nu (de hamnar i "Delar utan plats" istället, inte borttappade).
+  const deleteLocation = async (loc) => {
+    const affected = getItems(loc);
+    await saveItems(items.map(i => affected.some(a=>a.id===i.id) ? {...i, location:"", locationType:""} : i));
+    toast$(`Platsen "${loc}" borttagen — ${affected.length} delar flyttade till "Delar utan plats"`,"success");
+    setConfirmDeleteLoc(null);
+    if (expanded===loc) setExpanded(null);
+  };
 
   // QR-kod för en hel låda/plats — skanna den för att direkt se allt som
   // finns där (se ScanPage, som känner igen prefixet "LAGERBOX:").
@@ -1857,6 +1965,10 @@ function LocationViewPage({ items, pop, push, can, isAdmin, initialExpand }) {
     printHtml(html);
   };
 
+  const locationTypeOptions = lists?.locationTypes || [];
+  // Alla kända fulla platstexter — för snabbval i flytt-panelen
+  const knownLocations = [...new Set(items.map(i=>i.location).filter(Boolean))].sort();
+
   return (
     <Page>
       <TopBar title="Platser" subtitle="Vad finns var" onBack={pop}/>
@@ -1866,6 +1978,25 @@ function LocationViewPage({ items, pop, push, can, isAdmin, initialExpand }) {
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Sök plats, t.ex. Låda 3A…"
             style={{width:"100%",padding:"10px 10px 10px 30px",border:`1.5px solid ${BD}`,borderRadius:8,fontSize:13,boxSizing:"border-box",background:WH}}/>
         </div>
+
+        {/* Genvägar till de två specialsidorna */}
+        <div style={{display:"flex",gap:8,marginBottom:14}}>
+          <button onClick={()=>push("nolocation")} style={{flex:1,display:"flex",alignItems:"center",gap:8,background:WH,border:`1.5px solid ${AM}40`,borderRadius:10,padding:"10px 12px",cursor:"pointer",textAlign:"left"}}>
+            <Icon name="location-crosshairs" style={{color:AM}}/>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:TX}}>Utan plats</div>
+              <div style={{fontSize:10,color:MU}}>{noLocationCount} delar</div>
+            </div>
+          </button>
+          <button onClick={()=>push("missingitems")} style={{flex:1,display:"flex",alignItems:"center",gap:8,background:WH,border:`1.5px solid ${R}40`,borderRadius:10,padding:"10px 12px",cursor:"pointer",textAlign:"left"}}>
+            <Icon name="triangle-exclamation" style={{color:R}}/>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:TX}}>Försvunna</div>
+              <div style={{fontSize:10,color:MU}}>{missingCount} delar</div>
+            </div>
+          </button>
+        </div>
+
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
           {filtered.map(loc => {
             const locItems = getItems(loc);
@@ -1885,19 +2016,55 @@ function LocationViewPage({ items, pop, push, can, isAdmin, initialExpand }) {
                       <Icon name="qrcode"/>
                     </button>
                   )}
+                  {(isAdmin||can("canDelete"))&&(
+                    <button onClick={()=>setConfirmDeleteLoc(loc)} title="Ta bort platsen" style={{background:"none",border:"none",color:MU,cursor:"pointer",padding:6,flexShrink:0}}>
+                      <Icon name="trash"/>
+                    </button>
+                  )}
                   <i onClick={()=>setExpanded(isOpen?null:loc)} className={`fa-solid fa-chevron-${isOpen?"up":"down"}`} style={{fontSize:12,color:MU,cursor:"pointer",flexShrink:0}}/>
                 </div>
                 {isOpen&&(
                   <div style={{borderTop:`1px solid ${BD}`}}>
                     {locItems.map(item=>(
-                      <div key={item.id} onClick={()=>push("detail",{item})}
-                        style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderBottom:`1px solid ${BD}`,cursor:"pointer",background:WH}}>
-                        <span style={{background:BX,color:WH,borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:800,flexShrink:0}}>#{item.stockNumber}</span>
-                        <div style={{flex:1,minWidth:0}}>
-                          <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}{item.side?` — ${item.side}`:""}</div>
-                          {item.oem&&<div style={{fontSize:10,color:MU,fontFamily:"monospace"}}>{item.oem}</div>}
+                      <div key={item.id} style={{borderBottom:`1px solid ${BD}`,background:WH}}>
+                        <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px"}}>
+                          <div onClick={()=>push("detail",{item})} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
+                            <span style={{background:BX,color:WH,borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:800,flexShrink:0}}>#{item.stockNumber}</span>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}{item.side?` — ${item.side}`:""}</div>
+                              {item.oem&&<div style={{fontSize:10,color:MU,fontFamily:"monospace"}}>{item.oem}</div>}
+                            </div>
+                            <div style={{flexShrink:0,fontFamily:"'Barlow Condensed',sans-serif",fontSize:16,fontWeight:800,color:item.quantity===0?R:GR}}>{item.quantity}</div>
+                          </div>
+                          {(isAdmin||can("canEdit"))&&!item.missing&&(
+                            <button onClick={async()=>{await saveItems(items.map(i=>i.id===item.id?{...i,missing:true,missingSince:Date.now()}:i));toast$(`${item.name} markerad som borttappad`,"success");}} title="Markera som borttappad" style={{background:"none",border:"none",color:MU,cursor:"pointer",padding:6,flexShrink:0}}>
+                              <Icon name="triangle-exclamation"/>
+                            </button>
+                          )}
+                          {(isAdmin||can("canEdit"))&&(
+                            <button onClick={()=>movingId===item.id?cancelMove():startMove(item)} title="Flytta till annan plats" style={{background:"none",border:"none",color:movingId===item.id?BX:MU,cursor:"pointer",padding:6,flexShrink:0}}>
+                              <Icon name="arrows-up-down-left-right"/>
+                            </button>
+                          )}
                         </div>
-                        <div style={{flexShrink:0,fontFamily:"'Barlow Condensed',sans-serif",fontSize:16,fontWeight:800,color:item.quantity===0?R:GR}}>{item.quantity}</div>
+                        {/* Inline flytt-panel — ändra plats direkt här, ingen omväg via
+                            massredigering eller att skriva ner det på papper */}
+                        {movingId===item.id&&(
+                          <div style={{padding:"0 14px 14px",background:BG}} onClick={e=>e.stopPropagation()}>
+                            <div style={{display:"flex",gap:8,marginBottom:8}}>
+                              <select value={moveType} onChange={e=>setMoveType(e.target.value)} style={{flex:1,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12,background:WH}}>
+                                <option value="">Typ (valfritt)</option>
+                                {locationTypeOptions.filter(Boolean).map(t=><option key={t} value={t}>{t}</option>)}
+                              </select>
+                              <input value={moveLoc} onChange={e=>setMoveLoc(e.target.value)} placeholder="Plats, t.ex. 3A" list="known-locations"
+                                style={{flex:1.4,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12}}/>
+                            </div>
+                            <div style={{display:"flex",gap:8}}>
+                              <Btn small variant="ghost" onClick={cancelMove}>Avbryt</Btn>
+                              <Btn small onClick={()=>confirmMove(item)}>Flytta hit</Btn>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1906,6 +2073,149 @@ function LocationViewPage({ items, pop, push, can, isAdmin, initialExpand }) {
             );
           })}
           {filtered.length===0&&<div style={{textAlign:"center",color:MU,padding:40}}>Inga platser hittades</div>}
+        </div>
+      </div>
+
+      <datalist id="known-locations">
+        {knownLocations.map(l=><option key={l} value={l}/>)}
+      </datalist>
+
+      {confirmDeleteLoc&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}} onClick={()=>setConfirmDeleteLoc(null)}>
+          <div onClick={e=>e.stopPropagation()} style={{background:WH,borderRadius:14,padding:20,maxWidth:360,width:"100%"}}>
+            <div style={{fontWeight:700,fontSize:15,marginBottom:8}}>Ta bort platsen "{confirmDeleteLoc}"?</div>
+            <div style={{fontSize:13,color:MU,marginBottom:16}}>
+              {getItems(confirmDeleteLoc).length} delar ligger här just nu. De tas INTE bort — de flyttas till "Delar utan plats", redo att tilldelas en ny plats.
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn full variant="ghost" onClick={()=>setConfirmDeleteLoc(null)}>Avbryt</Btn>
+              <Btn full variant="red" onClick={()=>deleteLocation(confirmDeleteLoc)}>Ta bort plats</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </Page>
+  );
+}
+
+// ─── Delar utan plats ──────────────────────────────────────────────────────────
+function NoLocationPage({ items, saveItems, lists, pop, push, can, isAdmin, toast$ }) {
+  const [search, setSearch] = useState("");
+  const [movingId, setMovingId] = useState(null);
+  const [moveType, setMoveType] = useState("");
+  const [moveLoc, setMoveLoc] = useState("");
+
+  const noLoc = items.filter(i => !i.location).filter(i => !search || i.name.toLowerCase().includes(search.toLowerCase()) || (i.stockNumber||"").includes(search));
+
+  const startMove = (item) => { setMovingId(item.id); setMoveType(item.locationType||""); setMoveLoc(""); };
+  const cancelMove = () => { setMovingId(null); setMoveType(""); setMoveLoc(""); };
+  const confirmMove = async (item) => {
+    if (!moveLoc.trim()) { toast$("Ange en plats","error"); return; }
+    await saveItems(items.map(i => i.id===item.id ? {...i, locationType:moveType, location:moveLoc} : i));
+    toast$(`${item.name} tilldelad plats: ${[moveType,moveLoc].filter(Boolean).join(" — ")}`,"success");
+    cancelMove();
+  };
+
+  const locationTypeOptions = lists?.locationTypes || [];
+  const knownLocations = [...new Set(items.map(i=>i.location).filter(Boolean))].sort();
+
+  return (
+    <Page>
+      <TopBar title="Delar utan plats" subtitle={`${noLoc.length} delar saknar en tilldelad plats`} onBack={pop}/>
+      <div style={{padding:"14px 14px 40px"}}>
+        <div style={{position:"relative",marginBottom:14}}>
+          <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:13,color:MU,pointerEvents:"none"}}><Icon name="magnifying-glass"/></span>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Sök namn eller lagernummer…"
+            style={{width:"100%",padding:"10px 10px 10px 30px",border:`1.5px solid ${BD}`,borderRadius:8,fontSize:13,boxSizing:"border-box",background:WH}}/>
+        </div>
+        {noLoc.length===0&&<div style={{textAlign:"center",color:MU,padding:40}}><Icon name="circle-check" style={{fontSize:32,marginBottom:10,display:"block",color:GR}}/>Alla delar har en tilldelad plats</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {noLoc.map(item=>(
+            <div key={item.id} style={{background:WH,borderRadius:10,border:`1px solid ${AM}40`,overflow:"hidden"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px"}}>
+                <div onClick={()=>push("detail",{item})} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
+                  <span style={{background:BX,color:WH,borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:800,flexShrink:0}}>#{item.stockNumber}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}{item.side?` — ${item.side}`:""}</div>
+                    {item.warehouse&&<div style={{fontSize:10,color:MU}}>{item.warehouse}</div>}
+                  </div>
+                </div>
+                {(isAdmin||can("canEdit"))&&(
+                  <Btn small variant={movingId===item.id?"blue":"ghost"} onClick={()=>movingId===item.id?cancelMove():startMove(item)}>
+                    <Icon name="location-dot"/> Ge plats
+                  </Btn>
+                )}
+              </div>
+              {movingId===item.id&&(
+                <div style={{padding:"0 14px 14px",background:BG}}>
+                  <div style={{display:"flex",gap:8,marginBottom:8}}>
+                    <select value={moveType} onChange={e=>setMoveType(e.target.value)} style={{flex:1,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12,background:WH}}>
+                      <option value="">Typ (valfritt)</option>
+                      {locationTypeOptions.filter(Boolean).map(t=><option key={t} value={t}>{t}</option>)}
+                    </select>
+                    <input value={moveLoc} onChange={e=>setMoveLoc(e.target.value)} placeholder="Plats, t.ex. 3A" list="known-locations-nl" autoFocus
+                      style={{flex:1.4,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12}}/>
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn small variant="ghost" onClick={cancelMove}>Avbryt</Btn>
+                    <Btn small onClick={()=>confirmMove(item)}>Spara plats</Btn>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+      <datalist id="known-locations-nl">
+        {knownLocations.map(l=><option key={l} value={l}/>)}
+      </datalist>
+    </Page>
+  );
+}
+
+// ─── Försvunna delar ───────────────────────────────────────────────────────────
+function MissingItemsPage({ items, saveItems, pop, push, can, isAdmin, toast$, logActivity, currentUser }) {
+  const [search, setSearch] = useState("");
+  const missing = items.filter(i => i.missing).filter(i => !search || i.name.toLowerCase().includes(search.toLowerCase()) || (i.stockNumber||"").includes(search));
+
+  const markFound = async (item) => {
+    await saveItems(items.map(i => i.id===item.id ? {...i, missing:false, missingSince:null} : i));
+    logActivity&&logActivity("found", `${item.name}${item.stockNumber?` (#${item.stockNumber})`:""} markerad som hittad igen`, { user: currentUser?.username });
+    toast$(`${item.name} markerad som hittad`,"success");
+  };
+
+  return (
+    <Page>
+      <TopBar title="Försvunna delar" subtitle={`${missing.length} delar markerade som borttappade`} onBack={pop}/>
+      <div style={{padding:"14px 14px 40px"}}>
+        <div style={{position:"relative",marginBottom:14}}>
+          <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:13,color:MU,pointerEvents:"none"}}><Icon name="magnifying-glass"/></span>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Sök namn eller lagernummer…"
+            style={{width:"100%",padding:"10px 10px 10px 30px",border:`1.5px solid ${BD}`,borderRadius:8,fontSize:13,boxSizing:"border-box",background:WH}}/>
+        </div>
+        {missing.length===0&&<div style={{textAlign:"center",color:MU,padding:40}}><Icon name="circle-check" style={{fontSize:32,marginBottom:10,display:"block",color:GR}}/>Inga delar markerade som borttappade</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {missing.map(item=>(
+            <div key={item.id} style={{background:WH,borderRadius:10,border:`1px solid ${R}40`,padding:"12px 14px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div onClick={()=>push("detail",{item})} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
+                  <Icon name="triangle-exclamation" style={{color:R,flexShrink:0}}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontWeight:600,fontSize:13}}>{item.name}{item.side?` — ${item.side}`:""}</div>
+                    <div style={{fontSize:11,color:MU,marginTop:2}}>
+                      {item.location
+                        ? <>Var registrerad på: <b style={{color:TX}}>{[item.locationType,item.location].filter(Boolean).join(" — ")}</b> — men hittas inte där nu</>
+                        : "Ingen registrerad plats"}
+                    </div>
+                    {item.missingSince&&<div style={{fontSize:10,color:MU,marginTop:2}}>Markerad borttappad: {new Date(item.missingSince).toLocaleDateString("sv-SE")}</div>}
+                  </div>
+                </div>
+                {(isAdmin||can("canEdit"))&&(
+                  <Btn small variant="ghost" onClick={()=>markFound(item)}><Icon name="check"/> Hittad</Btn>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </Page>
@@ -1925,7 +2235,7 @@ function QrLabelsPage({ items, pop, preSelected }) {
   const filtered = items.filter(i => {
     if (!search) return true;
     const q = search.toLowerCase();
-    return [i.name, i.oem, i.stockNumber, i.make, i.location].some(f=>f?.toLowerCase().includes(q));
+    return [i.name, i.oem, i.stockNumber, i.make, i.location, ...(i.alternativeNumbers||[])].some(f=>f?.toLowerCase().includes(q));
   });
 
   const qrUrl = (text) => `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(text)}`;
@@ -1999,15 +2309,15 @@ function QrLabelsPage({ items, pop, preSelected }) {
       return;
     }
     if (labelType==="qr_full") {
-      labelHtml = toPrint.map(i=>`<div class="label"><img src="${qrUrl(i.oem||i.stockNumber)}" style="width:90px;height:90px"/><div class="name">${i.name}${i.side?" — "+i.side:""}</div><div class="row-info"><span class="badge">#${i.stockNumber||"—"}</span></div><div class="art">${i.oem||"—"}</div></div>`).join("");
+      labelHtml = toPrint.map(i=>`<div class="label"><img src="${qrUrl(i.stockNumber||i.oem)}" style="width:90px;height:90px"/><div class="name">${i.name}${i.side?" — "+i.side:""}</div><div class="row-info"><span class="badge">#${i.stockNumber||"—"}</span></div><div class="art">${i.oem||"—"}</div></div>`).join("");
     } else if (labelType==="qr_mini") {
-      labelHtml = toPrint.map(i=>`<div class="label" style="padding:6px"><img src="${qrUrl(i.oem||i.stockNumber)}" style="width:55px;height:55px"/><div style="font-weight:800;font-size:13px;color:#1B3A6B">#${i.stockNumber||"—"}</div><div style="font-size:9px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i.name}</div></div>`).join("");
+      labelHtml = toPrint.map(i=>`<div class="label" style="padding:6px"><img src="${qrUrl(i.stockNumber||i.oem)}" style="width:55px;height:55px"/><div style="font-weight:800;font-size:13px;color:#1B3A6B">#${i.stockNumber||"—"}</div><div style="font-size:9px;color:#666;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${i.name}</div></div>`).join("");
     } else if (labelType==="barcode") {
       labelHtml = toPrint.map(i=>`<div class="label"><img src="${barcodeUrl(i.oem||i.stockNumber)}" style="width:100%;height:45px;object-fit:contain"/><div class="name">${i.name}${i.side?" — "+i.side:""}</div><div class="row-info"><span class="badge">#${i.stockNumber||"—"}</span></div><div class="art">${i.oem||"—"}</div></div>`).join("");
     } else if (labelType==="price_tag") {
       labelHtml = toPrint.map(i=>`<div class="label"><div style="font-size:26px;font-weight:900;color:#1B3A6B;line-height:1">${(i.price||0).toLocaleString("sv-SE")} kr</div><div class="name">${i.name}${i.side?" — "+i.side:""}</div><div class="row-info"><span class="badge">#${i.stockNumber||"—"}</span></div><div class="art">${i.oem||"—"}</div>${i.make?`<div style="font-size:9px;color:#888">${i.make}${i.model?" "+i.model:""}</div>`:""}</div>`).join("");
     } else {
-      labelHtml = toPrint.map(i=>`<div class="label" style="text-align:left;display:flex;gap:8px;align-items:flex-start"><img src="${qrUrl(i.oem||i.stockNumber)}" style="width:65px;height:65px;flex-shrink:0"/><div style="flex:1;min-width:0"><div style="font-weight:800;font-size:12px;margin-bottom:3px">${i.name}${i.side?" — "+i.side:""}</div><div style="font-size:20px;font-weight:900;color:#1B3A6B;line-height:1;margin-bottom:3px">${(i.price||0).toLocaleString("sv-SE")} kr</div><div><span class="badge">#${i.stockNumber||"—"}</span></div><div style="font-size:9px;color:#666;margin-top:2px">Art: ${i.oem||"—"}</div>${i.make?`<div style="font-size:9px;color:#666">${i.make}${i.model?" "+i.model:""}</div>`:""}</div></div>`).join("");
+      labelHtml = toPrint.map(i=>`<div class="label" style="text-align:left;display:flex;gap:8px;align-items:flex-start"><img src="${qrUrl(i.stockNumber||i.oem)}" style="width:65px;height:65px;flex-shrink:0"/><div style="flex:1;min-width:0"><div style="font-weight:800;font-size:12px;margin-bottom:3px">${i.name}${i.side?" — "+i.side:""}</div><div style="font-size:20px;font-weight:900;color:#1B3A6B;line-height:1;margin-bottom:3px">${(i.price||0).toLocaleString("sv-SE")} kr</div><div><span class="badge">#${i.stockNumber||"—"}</span></div><div style="font-size:9px;color:#666;margin-top:2px">Art: ${i.oem||"—"}</div>${i.make?`<div style="font-size:9px;color:#666">${i.make}${i.model?" "+i.model:""}</div>`:""}</div></div>`).join("");
     }
 
     const cols = labelType==="qr_mini"?4:labelType==="full_card"?1:3;
@@ -3115,7 +3425,7 @@ function BulkEditPage({ items, saveItems, lists, pop, toast$, can, isAdmin, curr
       const sn = (i.stockNumber||"").toLowerCase();
       return nums.some(n => sn===n || sn.includes(n));
     }
-    return [i.name,i.sku,i.oem,i.stockNumber,i.category,i.regNumber,i.location,i.make,i.model].some(f=>f?.toLowerCase().includes(q));
+    return [i.name,i.sku,i.oem,i.stockNumber,i.category,i.regNumber,i.location,i.make,i.model,...(i.alternativeNumbers||[])].some(f=>f?.toLowerCase().includes(q));
   });
   const selAll = () => setSelected(new Set(filtered.map(i=>i.id)));
 
@@ -4038,7 +4348,7 @@ const sc = q => q===0?R:GR;
 const cc = c => c==="Ny"?GR:c?.includes("Gott")?BX:c?.includes("spricka")?AM:MU;
 
 // ─── Login Page ───────────────────────────────────────────────────────────────
-function LoginPage({ users, saveUsers, setSession, push, pop, toast$, logActivity }) {
+function LoginPage({ users, saveUsers, setSession, push, pop, replace, toast$, logActivity }) {
   const [u, setU] = useState(""); const [p, setP] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPw, setShowPw] = useState(false);
@@ -4093,7 +4403,10 @@ function LoginPage({ users, saveUsers, setSession, push, pop, toast$, logActivit
 
       reportEvent("login", `${r.user.username} loggade in`);
       logActivity&&logActivity("login", `${r.user.username} loggade in`, { user: r.user.username });
-      pop();
+      // replace (inte pop) — fungerar oavsett om inloggningen är stackens
+      // första/enda sida (normalfallet nu, ingen gästvy längre) eller
+      // pushad ovanpå något annat (t.ex. om sessionen gick ut mitt i).
+      replace("inventory");
       toast$(`Välkommen, ${r.user.username}!`,"success");
     } catch (e) {
       setError("Kunde inte nå servern");
@@ -4164,7 +4477,7 @@ const gridComponents = {
 };
 
 // ─── Inventory Page ───────────────────────────────────────────────────────────
-function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSession, push, toast$, saveItems, viewMode, setViewMode, filters, applyFilters, search, setSearch, sortPref, setSortPref, cart, addToCart, settings, moveToTrash, lists, canManageItem }) {
+function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSession, push, replace, toast$, saveItems, viewMode, setViewMode, filters, applyFilters, search, setSearch, sortPref, setSortPref, cart, addToCart, settings, moveToTrash, lists, canManageItem }) {
   const [showSort, setShowSort] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const setFilters = applyFilters;
@@ -4183,7 +4496,7 @@ function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSe
 
   let filtered = items.filter(i => {
     const q = search.toLowerCase();
-    const m = !q || [i.name,i.sku,i.category,i.oem,i.compatible,i.side,i.supplier,i.location,i.make,i.model,i.regNumber,i.stockNumber,getBrandGroup(i.make),i.warehouse].some(f=>f?.toLowerCase().includes(q));
+    const m = !q || [i.name,i.sku,i.category,i.oem,i.compatible,i.side,i.supplier,i.location,i.make,i.model,i.regNumber,i.stockNumber,getBrandGroup(i.make),i.warehouse,...(i.alternativeNumbers||[])].some(f=>f?.toLowerCase().includes(q));
     if (!m) return false;
     // Lagernummer-filter: exakt match mot någon i listan
     if (stockNumList.length && !stockNumList.includes((i.stockNumber||"").toLowerCase())) return false;
@@ -4339,7 +4652,7 @@ function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSe
               </div>
               <span style={{fontSize:14,fontWeight:500,color:TX}}>Min profil</span>
             </button>
-            <button onClick={()=>{setMenuOpen(false);doLogout();setSession(null);toast$("Utloggad");}} style={{width:"100%",display:"flex",alignItems:"center",gap:14,padding:"12px 20px",background:"none",border:"none",cursor:"pointer",color:R}}>
+            <button onClick={()=>{setMenuOpen(false);doLogout();setSession(null);toast$("Utloggad");replace("login");}} style={{width:"100%",display:"flex",alignItems:"center",gap:14,padding:"12px 20px",background:"none",border:"none",cursor:"pointer",color:R}}>
               <div style={{width:36,height:36,borderRadius:9,background:R+"10",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
                 <Icon name="right-from-bracket" style={{fontSize:15,color:R}}/>
               </div>
@@ -4954,7 +5267,7 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
   };
   const handleScan = (code) => {
     const c = (code||"").trim();
-    const match = items.find(i => i.oem===c || i.stockNumber===c || i.sku===c || i.id===c);
+    const match = items.find(i => i.oem===c || i.stockNumber===c || i.sku===c || i.id===c || i.alternativeNumbers?.includes(c));
     if (!match) { toast$(`Ingen del matchade: ${c}`,"error"); return; }
     const free = (match.quantity||0) - ((match.reservations&&match.reservations.length)||0);
     if (free <= 0) { toast$(`${match.name} har inga lediga exemplar`,"error"); return; }
@@ -4980,7 +5293,7 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
     if (pf.priceMax!=="" && (i.price||0)>Number(pf.priceMax)) return false;
     if (!pickSearch.trim()) return true;
     const q = pickSearch.trim().toLowerCase();
-    return [i.name,i.sku,i.oem,i.stockNumber,i.category,i.side,i.location,i.regNumber,i.make,i.model].some(f=>f?.toLowerCase().includes(q));
+    return [i.name,i.sku,i.oem,i.stockNumber,i.category,i.side,i.location,i.regNumber,i.make,i.model,...(i.alternativeNumbers||[])].some(f=>f?.toLowerCase().includes(q));
   });
   // Sortering av valbara delar
   const PICK_NUMERIC = new Set(["price","stockNumber","quantity"]);
@@ -5847,10 +6160,10 @@ function DetailPage({ item: initialItem, items, sales, saveItems, saveSales, add
 
         {/* QR-kod */}
         <div style={{background:WH,borderRadius:10,border:`1px solid ${BD}`,padding:"14px",marginBottom:14,display:"flex",alignItems:"center",gap:14}}>
-          <img src={`https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(item.oem||item.stockNumber||item.sku)}`} alt="QR" style={{width:70,height:70,borderRadius:6,border:`1px solid ${BD}`}} onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="flex";}} /><div style={{width:70,height:70,borderRadius:6,border:`1px solid ${BD}`,background:BG,display:"none",alignItems:"center",justifyContent:"center",fontSize:9,color:MU,textAlign:"center",padding:4,fontFamily:"monospace"}}>{item.oem||item.stockNumber||item.sku}</div>
+          <img src={`https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(item.stockNumber||item.oem||item.sku)}`} alt="QR" style={{width:70,height:70,borderRadius:6,border:`1px solid ${BD}`}} onError={e=>{e.target.style.display="none";e.target.nextSibling.style.display="flex";}} /><div style={{width:70,height:70,borderRadius:6,border:`1px solid ${BD}`,background:BG,display:"none",alignItems:"center",justifyContent:"center",fontSize:9,color:MU,textAlign:"center",padding:4,fontFamily:"monospace"}}>{item.stockNumber||item.oem||item.sku}</div>
           <div>
             <div style={{fontSize:10,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:3}}>QR-kod för skanning</div>
-            <div style={{fontSize:13,fontWeight:600,fontFamily:"monospace"}}>{item.oem||item.stockNumber||item.sku}</div>
+            <div style={{fontSize:13,fontWeight:600,fontFamily:"monospace"}}>{item.stockNumber||item.oem||item.sku}</div>
           </div>
         </div>
 
@@ -6171,7 +6484,7 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
   // Lagernummer som ligger i papperskorgen räknas som upptagna tills de
   // rensas permanent — annars skulle en ny del kunna kapa numret från en
   // del som väntar på att återställas. Se src/calc.mjs (testad funktion).
-  const [f, setF] = useState(item ? {...item} : {name:"",stockNumber:nextAvailableStockNumber(items, trash), side:"",category:"Skärmar",quantity:1,price:0,costPrice:0,supplier:"",location:"",warehouse:"",weight:"",colorCode:"",oem:"",description:"",condition:"Begagnad - Gott skick",compatible:"",make:"",model:"",yearFrom:"",yearTo:"",regNumber:"",notes:"",images:[]});
+  const [f, setF] = useState(item ? {...item, alternativeNumbers: item.alternativeNumbers||[]} : {name:"",stockNumber:nextAvailableStockNumber(items, trash), side:"",category:"Skärmar",quantity:1,price:0,costPrice:0,supplier:"",location:"",warehouse:"",weight:"",colorCode:"",oem:"",alternativeNumbers:[],description:"",condition:"Begagnad - Gott skick",compatible:"",make:"",model:"",yearFrom:"",yearTo:"",regNumber:"",notes:"",images:[]});
   // Pris exkl. moms (härlett från lagrat inkl-moms-pris; 25% moms)
   const [priceExVat, setPriceExVat] = useState(item && item.price ? String(inclVatToExVat(item.price)) : "");
   const set = (k,v) => setF(p=>({...p,[k]:v}));
@@ -6463,6 +6776,25 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
 
           <div style={{background:WH,borderRadius:10,border:`1px solid ${BD}`,padding:14,marginBottom:12,display:"flex",flexDirection:"column",gap:12}}>
             <Inp label="Artikelnummer (OEM) *" value={f.oem} onChange={e=>set("oem",e.target.value.toUpperCase())} placeholder="t.ex. 8Y0941034"/>
+
+            {/* Fler artikelnummer — samma del kan ha flera giltiga OEM-nummer
+                (t.ex. olika årsmodeller/marknader). Sparas i alternativeNumbers,
+                samma fält KGK-integrationen redan fyller i automatiskt. */}
+            <div>
+              <label style={{display:"block",fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:6}}>Fler artikelnummer (valfritt)</label>
+              {(f.alternativeNumbers||[]).map((num,idx)=>(
+                <div key={idx} style={{display:"flex",gap:6,marginBottom:6}}>
+                  <input value={num} onChange={e=>{
+                    const next=[...f.alternativeNumbers]; next[idx]=e.target.value.toUpperCase(); set("alternativeNumbers",next);
+                  }} placeholder="t.ex. 8Y0941024" style={{flex:1,padding:"9px 12px",border:`1.5px solid ${BD}`,borderRadius:7,fontSize:13,fontFamily:"monospace"}}/>
+                  <button onClick={()=>set("alternativeNumbers",f.alternativeNumbers.filter((_,i)=>i!==idx))} style={{background:"none",border:"none",color:MU,cursor:"pointer",padding:"0 8px",fontSize:16}}>×</button>
+                </div>
+              ))}
+              <button onClick={()=>set("alternativeNumbers",[...(f.alternativeNumbers||[]),""])} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:`1.5px dashed ${BD}`,borderRadius:7,padding:"8px 12px",color:BX,fontSize:12,fontWeight:700,cursor:"pointer",width:"100%",justifyContent:"center"}}>
+                <Icon name="plus"/> Lägg till artikelnummer
+              </button>
+            </div>
+
             <Inp label="Lagernummer *" value={f.stockNumber} onChange={e=>{stockNumberAuto.current=false;set("stockNumber",e.target.value);}}/>
             {dupStockNumber&&<div style={{background:"rgba(255,107,107,.15)",borderRadius:6,padding:"6px 10px",fontSize:11,fontWeight:700,color:R}}><i className="fa-solid fa-triangle-exclamation"/> {dupStockNumberTrash ? <>Ligger i papperskorgen ({dupStockNumberTrash.name})</> : <>Används redan av {dupStockNumber.name}</>}</div>}
             <Sel label="Lager (ort) *" value={f.warehouse||""} onChange={e=>setWarehouse(e.target.value)} options={["",...WHS]}/>
