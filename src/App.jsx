@@ -1078,14 +1078,15 @@ function AppInner() {
 
   // Loggar ut automatiskt om servern svarar 401 (sessionen ogiltig/utgången)
   // — annars sitter man fast i ett trasigt läge där inget laddas men man
-  // inte förstår varför. (Själva token-laddningen sker numera synkront,
-  // direkt i komponentens kropp — se överst i AppInner — så den garanterat
-  // är på plats INNAN första datahämtningen, inte i en useEffect här.)
+  // inte förstår varför. Skickar nu ALLTID till inloggningssidan direkt när
+  // detta händer (skickade tidigare bara ut sessionen utan att navigera —
+  // man blev stående på en nu låst sida istället för att komma till login).
   useEffect(() => {
     setOnSessionExpired(() => {
       clearSession();
       setCurrentToken(null);
       setSession(null);
+      setStack([{ name:"login" }]);
     });
   }, []);
 
@@ -1162,7 +1163,7 @@ function AppInner() {
     return item.warehouse === currentUser.homeWarehouse;
   };
 
-  const sharedProps = { users, items, sales, cart, setCart, addToCart, clearCart, activityLog, logActivity, settings, saveSettings, suppliers, saveSuppliers, customers, saveCustomers, favorites, saveFavorites, saveItems, saveUsers, saveSales, roles, saveRoles, lists, saveLists, session, setSession, currentUser, isAdmin, isFullAdmin, isPlatsAdmin, can, canManageItem, toast$, push, pop, replace, viewMode, setViewMode, filters, applyFilters, search, setSearch, sortPref, setSortPref, setItems, setSales, setSettings, setSuppliers, theme, setTheme, trash, saveTrash, moveToTrash };
+  const sharedProps = { users, items, sales, cart, setCart, addToCart, clearCart, activityLog, logActivity, settings, saveSettings, suppliers, saveSuppliers, customers, saveCustomers, favorites, saveFavorites, saveItems, saveUsers, saveSales, roles, saveRoles, lists, saveLists, session, setSession, currentUser, isAdmin, isFullAdmin, isPlatsAdmin, can, canManageItem, toast$, push, pop, replace, viewMode, setViewMode, filters, applyFilters, search, setSearch, sortPref, setSortPref, setItems, setSales, setSettings, setSuppliers, theme, setTheme, trash, saveTrash, moveToTrash, loaded };
   const showSidebar = !isMobile && currentUser;
 
   return (
@@ -4484,7 +4485,7 @@ const gridComponents = {
 };
 
 // ─── Inventory Page ───────────────────────────────────────────────────────────
-function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSession, push, replace, toast$, saveItems, viewMode, setViewMode, filters, applyFilters, search, setSearch, sortPref, setSortPref, cart, addToCart, settings, moveToTrash, lists, canManageItem }) {
+function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSession, push, replace, toast$, saveItems, viewMode, setViewMode, filters, applyFilters, search, setSearch, sortPref, setSortPref, cart, addToCart, settings, moveToTrash, lists, canManageItem, loaded }) {
   const [showSort, setShowSort] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const setFilters = applyFilters;
@@ -4492,6 +4493,7 @@ function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSe
   const setSortBy = (v) => setSortPref(p=>({...p,by:v}));
   const setSortDir = (v) => setSortPref(p=>({...p,dir:v}));
 
+  if (!loaded) return <Page><TopBar title="Lager" /><div style={{padding:60,textAlign:"center"}}><div style={{width:32,height:32,margin:"0 auto",border:`3px solid ${BD}`,borderTopColor:BX,borderRadius:"50%",animation:"spin .8s linear infinite"}}/></div></Page>;
   if (!can("canView")) return <Page><TopBar title="Lager" /><div style={{padding:40,textAlign:"center",color:R,fontWeight:600}}>Åtkomst nekad.</div></Page>;
 
   // Hjälpare: tolka kommaseparerade nummer ("11, 15, 23") till en lista
