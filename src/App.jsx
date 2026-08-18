@@ -875,6 +875,13 @@ function AppInner() {
   }, [current]);
 
   useEffect(() => {
+    // Körs INTE alls om ingen är inloggad — annars gjordes ett bortkastat
+    // (och missvisande) hämtningsförsök redan innan inloggning, som satte
+    // felaktiga lokala standardvärden istället för den riktiga datan.
+    // Beroendet på `session` (inte en tom lista) gör att detta körs på
+    // nytt automatiskt direkt efter en lyckad inloggning också — inte bara
+    // vid appens allra första start.
+    if (!session) { setLoaded(true); return; }
     (async () => {
       let u  = await sget("ow:users");     if (!u)  { u=[DEFAULT_ADMIN];  await sset("ow:users",u);  }
       let i  = await sget("ow:items");     if (!i)  { i=DEFAULT_ITEMS;    await sset("ow:items",i);  }
@@ -916,7 +923,7 @@ function AppInner() {
         }
       } catch {}
     })();
-  }, []);
+  }, [session]);
 
   // Håll en ref till stack så polling-intervallet aldrig återskapas
   const stackRef = useRef(stack);
