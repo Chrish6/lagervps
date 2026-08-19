@@ -1957,44 +1957,48 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
   const [movingId, setMovingId] = useState(null); // vilken del som just nu visar flytt-panelen
   const [moveType, setMoveType] = useState("");
   const [moveLoc, setMoveLoc] = useState("");
+  const [moveParent, setMoveParent] = useState("");
   const [confirmDeleteLoc, setConfirmDeleteLoc] = useState(null);
-  const [settingParentFor, setSettingParentFor] = useState(null); // vilken plats som just nu väljer sin "ligger på"-plats
+  const [settingParentFor, setSettingParentFor] = useState(null); // vilken plats-grupp som just nu väljer sin "ligger på"-plats
   const [parentPick, setParentPick] = useState("");
 
   const norm = s => (s||"").trim().toLowerCase();
-  // Smart gruppering — "Låda 1" och "låda 1" är samma plats, oavsett
-  // skiftläge/mellanslag. Grupperas på en normaliserad nyckel, men visas
-  // med den vanligaste faktiska skrivningen (så en enstaka felstavning
-  // inte plötsligt "vinner" och byter hur platsen visas för alla).
+  // En plats identifieras av TYP + NAMN + VAR DEN SJÄLV FINNS (parentLocation)
+  // — annars skulle t.ex. två olika "Låda 1" (en i Hisshylla 2, en på Hylla
+  // 1A) råka slås ihop till en enda plats bara för att de råkar heta
+  // likadant. parentLocation gör dem entydigt olika platser istället.
+  const fullKey = i => [i.locationType, i.location, i.parentLocation].filter(Boolean).join(" — ");
+  // Smart gruppering — "Låda 1" och "låda 1" är samma plats (oavsett
+  // skiftläge/mellanslag), MEN bara om de även har samma parentLocation.
+  // Grupperas på en normaliserad nyckel, visas med den vanligaste faktiska
+  // skrivningen (så en enstaka felstavning inte "vinner" och byter visning).
   const groups = {};
   items.forEach(i => {
-    const full = [i.locationType, i.location].filter(Boolean).join(" — ");
-    if (!full) return;
+    const full = fullKey(i);
+    if (!i.location) return;
     const key = norm(full);
-    if (!groups[key]) groups[key] = { display: full, count: {} };
-    groups[key].count[full] = (groups[key].count[full]||0) + 1;
-    if (groups[key].count[full] > (groups[key].count[groups[key].display]||0)) groups[key].display = full;
+    if (!groups[key]) groups[key] = { display: [i.locationType,i.location].filter(Boolean).join(" — "), parent: i.parentLocation||"", count: {} };
+    const d = [i.locationType,i.location].filter(Boolean).join(" — ");
+    groups[key].count[d] = (groups[key].count[d]||0) + 1;
+    if (groups[key].count[d] > (groups[key].count[groups[key].display]||0)) groups[key].display = d;
   });
   const locations = Object.entries(groups)
-    .map(([key,g]) => ({ key, display:g.display, locationType: items.find(i=>norm([i.locationType,i.location].filter(Boolean).join(" — "))===key)?.locationType||"" }))
-    .sort((a,b)=>naturalCompare(a.display,b.display));
+    .map(([key,g]) => ({ key, display:g.display, parent:g.parent, locationType: items.find(i=>norm(fullKey(i))===key)?.locationType||"" }))
+    .sort((a,b)=>naturalCompare(a.display,b.display) || naturalCompare(a.parent,b.parent));
 
   const filtered = locations.filter(l =>
-    (!search || l.display.toLowerCase().includes(search.toLowerCase())) &&
+    (!search || l.display.toLowerCase().includes(search.toLowerCase()) || l.parent.toLowerCase().includes(search.toLowerCase())) &&
     (!typeFilter || l.locationType === typeFilter)
   );
-  const getItems = (locKey) => items.filter(i => norm([i.locationType, i.location].filter(Boolean).join(" — ")) === locKey);
+  const getItems = (locKey) => items.filter(i => norm(fullKey(i)) === locKey);
   const noLocationCount = items.filter(i => !i.location).length;
   const missingCount = items.filter(i => i.missing).length;
 
-  // Hierarki — en plats kan själv "ligga på" en annan plats (t.ex. Låda 12
-  // ligger på Hylla A3). Sparas som en enkel karta i lists, separat från
-  // själva delarna — normaliserad nyckel → fullständig platstext för föräldern.
-  const locationParents = lists?.locationParents || {};
-  const setParent = async (childKey, parentDisplay) => {
-    const next = { ...locationParents };
-    if (parentDisplay) next[childKey] = parentDisplay; else delete next[childKey];
-    await saveLists({ ...lists, locationParents: next });
+  // Sätter "var den här platsen själv finns" på ALLA delar i gruppen på en
+  // gång — t.ex. att alla delar i "Låda 12" får parentLocation "Hylla A3".
+  const setParent = async (locKey, parentDisplay) => {
+    const affected = getItems(locKey);
+    await saveItems(items.map(i => affected.some(a=>a.id===i.id) ? {...i, parentLocation: parentDisplay} : i));
     setSettingParentFor(null); setParentPick("");
     toast$(parentDisplay?`Plats kopplad till ${parentDisplay}`:"Koppling borttagen","success");
   };
@@ -2003,23 +2007,20 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
     setMovingId(item.id);
     setMoveType(item.locationType||"");
     setMoveLoc(item.location||"");
+    setMoveParent(item.parentLocation||"");
   };
-  const cancelMove = () => { setMovingId(null); setMoveType(""); setMoveLoc(""); };
+  const cancelMove = () => { setMovingId(null); setMoveType(""); setMoveLoc(""); setMoveParent(""); };
   const confirmMove = async (item) => {
-    await saveItems(items.map(i => i.id===item.id ? {...i, locationType:moveType, location:moveLoc} : i));
+    await saveItems(items.map(i => i.id===item.id ? {...i, locationType:moveType, location:moveLoc, parentLocation:moveParent} : i));
     toast$(`${item.name} flyttad till ${[moveType,moveLoc].filter(Boolean).join(" — ")||"ingen plats"}`,"success");
     cancelMove();
   };
 
-  // Ta bort en plats — rensar location/locationType på ALLA delar som finns
-  // där just nu (de hamnar i "Delar utan plats" istället, inte borttappade).
+  // Ta bort en plats — rensar location/locationType/parentLocation på ALLA
+  // delar som finns där just nu (de hamnar i "Delar utan plats" istället).
   const deleteLocation = async (locKey, display) => {
     const affected = getItems(locKey);
-    await saveItems(items.map(i => affected.some(a=>a.id===i.id) ? {...i, location:"", locationType:""} : i));
-    if (locationParents[locKey]) {
-      const next = {...locationParents}; delete next[locKey];
-      await saveLists({...lists, locationParents: next});
-    }
+    await saveItems(items.map(i => affected.some(a=>a.id===i.id) ? {...i, location:"", locationType:"", parentLocation:""} : i));
     toast$(`Platsen "${display}" borttagen — ${affected.length} delar flyttade till "Delar utan plats"`,"success");
     setConfirmDeleteLoc(null);
     if (expanded===locKey) setExpanded(null);
@@ -2097,7 +2098,7 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
           {filtered.map(loc => {
             const locItems = getItems(loc.key);
             const isOpen = expanded === loc.key;
-            const parent = locationParents[loc.key];
+            const parent = loc.parent;
             return (
               <div key={loc.key} style={{background:WH,borderRadius:10,border:`1.5px solid ${isOpen?BX:BD}`,overflow:"hidden"}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px"}}>
@@ -2180,6 +2181,8 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
                               <input value={moveLoc} onChange={e=>setMoveLoc(e.target.value)} placeholder="Plats, t.ex. 3A" list="known-locations"
                                 style={{flex:1.4,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12}}/>
                             </div>
+                            <input value={moveParent} onChange={e=>setMoveParent(e.target.value)} placeholder="Var finns den här platsen? (valfritt, t.ex. Hisshylla 2)" list="known-locations"
+                              style={{width:"100%",padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12,marginBottom:8,boxSizing:"border-box"}}/>
                             <div style={{display:"flex",gap:8}}>
                               <Btn small variant="ghost" onClick={cancelMove}>Avbryt</Btn>
                               <Btn small onClick={()=>confirmMove(item)}>Flytta hit</Btn>
@@ -2225,14 +2228,15 @@ function NoLocationPage({ items, saveItems, lists, pop, push, can, isAdmin, toas
   const [movingId, setMovingId] = useState(null);
   const [moveType, setMoveType] = useState("");
   const [moveLoc, setMoveLoc] = useState("");
+  const [moveParent, setMoveParent] = useState("");
 
   const noLoc = items.filter(i => !i.location).filter(i => !search || i.name.toLowerCase().includes(search.toLowerCase()) || (i.stockNumber||"").includes(search));
 
-  const startMove = (item) => { setMovingId(item.id); setMoveType(item.locationType||""); setMoveLoc(""); };
-  const cancelMove = () => { setMovingId(null); setMoveType(""); setMoveLoc(""); };
+  const startMove = (item) => { setMovingId(item.id); setMoveType(item.locationType||""); setMoveLoc(""); setMoveParent(""); };
+  const cancelMove = () => { setMovingId(null); setMoveType(""); setMoveLoc(""); setMoveParent(""); };
   const confirmMove = async (item) => {
     if (!moveLoc.trim()) { toast$("Ange en plats","error"); return; }
-    await saveItems(items.map(i => i.id===item.id ? {...i, locationType:moveType, location:moveLoc} : i));
+    await saveItems(items.map(i => i.id===item.id ? {...i, locationType:moveType, location:moveLoc, parentLocation:moveParent} : i));
     toast$(`${item.name} tilldelad plats: ${[moveType,moveLoc].filter(Boolean).join(" — ")}`,"success");
     cancelMove();
   };
@@ -2277,6 +2281,8 @@ function NoLocationPage({ items, saveItems, lists, pop, push, can, isAdmin, toas
                     <input value={moveLoc} onChange={e=>setMoveLoc(e.target.value)} placeholder="Plats, t.ex. 3A" list="known-locations-nl" autoFocus
                       style={{flex:1.4,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12}}/>
                   </div>
+                  <input value={moveParent} onChange={e=>setMoveParent(e.target.value)} placeholder="Var finns den här platsen? (valfritt)" list="known-locations-nl"
+                    style={{width:"100%",padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12,marginBottom:8,boxSizing:"border-box"}}/>
                   <div style={{display:"flex",gap:8}}>
                     <Btn small variant="ghost" onClick={cancelMove}>Avbryt</Btn>
                     <Btn small onClick={()=>confirmMove(item)}>Spara plats</Btn>
@@ -6144,6 +6150,7 @@ function DetailPage({ item: initialItem, items, sales, saveItems, saveSales, add
                 <div style={{flex:1}}>
                   <div style={{fontSize:10,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:1}}>Placering</div>
                   <div style={{fontSize:20,fontWeight:800,color:BX,lineHeight:1.1}}>{[item.locationType, item.location].filter(Boolean).join(" — ")}</div>
+                  {item.parentLocation&&<div style={{fontSize:11.5,color:MU,marginTop:2}}><i className="fa-solid fa-turn-up" style={{fontSize:9,transform:"rotate(90deg)",display:"inline-block",marginRight:4}}/>ligger på {item.parentLocation}</div>}
                 </div>
                 {item.warehouse&&<span style={{background:AM+"18",color:AM,borderRadius:14,padding:"4px 12px",fontSize:12,fontWeight:800,flexShrink:0}}><i className="fa-solid fa-industry" style={{marginRight:5,fontSize:10}}/>{item.warehouse}</span>}
               </div>
@@ -6924,6 +6931,7 @@ function EditPage({ item, items, saveItems, lists, pop, push, toast$, currentUse
               <H><Sel label="Placeringstyp" value={f.locationType||""} onChange={e=>set("locationType",e.target.value)} options={["",...LOCTYPES]}/></H>
               <H><Inp label="Placering *" value={f.location} onChange={e=>set("location",e.target.value)} placeholder="Hylla / plats"/></H>
             </G2>
+            <Inp label="Var finns den här platsen? (valfritt)" value={f.parentLocation||""} onChange={e=>set("parentLocation",e.target.value)} placeholder="T.ex. Hisshylla 2 — om Låda 1 finns flera ställen"/>
             <Inp label="Regnummer (om känt)" value={f.regNumber} onChange={e=>set("regNumber",formatRegNumber(e.target.value))} placeholder="Bilen delen kom ifrån"/>
             <Inp label="Pris (kr, inkl. moms)" type="number" min="0" value={f.price} onChange={e=>set("price",Number(e.target.value))}/>
             <div>
