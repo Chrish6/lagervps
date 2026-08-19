@@ -1929,23 +1929,75 @@ function ScanPage({ items, push, pop, toast$ }) {
   );
 }
 
+// Naturlig sortering — "Låda 2" ska komma före "Låda 10", inte efter (som
+// vanlig bokstavssortering skulle ge eftersom "1" < "2" tecken för tecken).
+function naturalCompare(a, b) {
+  const re = /(\d+)|(\D+)/g;
+  const pa = a.match(re) || [];
+  const pb = b.match(re) || [];
+  const len = Math.max(pa.length, pb.length);
+  for (let i=0;i<len;i++) {
+    const xa = pa[i]||"", xb = pb[i]||"";
+    const na = parseInt(xa,10), nb = parseInt(xb,10);
+    if (!isNaN(na) && !isNaN(nb) && /^\d+$/.test(xa) && /^\d+$/.test(xb)) {
+      if (na!==nb) return na-nb;
+    } else {
+      const c = xa.localeCompare(xb,"sv");
+      if (c!==0) return c;
+    }
+  }
+  return 0;
+}
+
 // ─── Location View Page ────────────────────────────────────────────────────────
-function LocationViewPage({ items, saveItems, lists, pop, push, can, isAdmin, toast$, initialExpand }) {
+function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, isAdmin, toast$, initialExpand }) {
   const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
   const [expanded, setExpanded] = useState(initialExpand || null);
   const [movingId, setMovingId] = useState(null); // vilken del som just nu visar flytt-panelen
   const [moveType, setMoveType] = useState("");
   const [moveLoc, setMoveLoc] = useState("");
   const [confirmDeleteLoc, setConfirmDeleteLoc] = useState(null);
+  const [settingParentFor, setSettingParentFor] = useState(null); // vilken plats som just nu väljer sin "ligger på"-plats
+  const [parentPick, setParentPick] = useState("");
 
-  const locations = [...new Set(
-    items.map(i => [i.locationType, i.location].filter(Boolean).join(" — ")).filter(Boolean)
-  )].sort();
+  const norm = s => (s||"").trim().toLowerCase();
+  // Smart gruppering — "Låda 1" och "låda 1" är samma plats, oavsett
+  // skiftläge/mellanslag. Grupperas på en normaliserad nyckel, men visas
+  // med den vanligaste faktiska skrivningen (så en enstaka felstavning
+  // inte plötsligt "vinner" och byter hur platsen visas för alla).
+  const groups = {};
+  items.forEach(i => {
+    const full = [i.locationType, i.location].filter(Boolean).join(" — ");
+    if (!full) return;
+    const key = norm(full);
+    if (!groups[key]) groups[key] = { display: full, count: {} };
+    groups[key].count[full] = (groups[key].count[full]||0) + 1;
+    if (groups[key].count[full] > (groups[key].count[groups[key].display]||0)) groups[key].display = full;
+  });
+  const locations = Object.entries(groups)
+    .map(([key,g]) => ({ key, display:g.display, locationType: items.find(i=>norm([i.locationType,i.location].filter(Boolean).join(" — "))===key)?.locationType||"" }))
+    .sort((a,b)=>naturalCompare(a.display,b.display));
 
-  const filtered = locations.filter(l => !search || l.toLowerCase().includes(search.toLowerCase()));
-  const getItems = (loc) => items.filter(i => [i.locationType, i.location].filter(Boolean).join(" — ") === loc);
+  const filtered = locations.filter(l =>
+    (!search || l.display.toLowerCase().includes(search.toLowerCase())) &&
+    (!typeFilter || l.locationType === typeFilter)
+  );
+  const getItems = (locKey) => items.filter(i => norm([i.locationType, i.location].filter(Boolean).join(" — ")) === locKey);
   const noLocationCount = items.filter(i => !i.location).length;
   const missingCount = items.filter(i => i.missing).length;
+
+  // Hierarki — en plats kan själv "ligga på" en annan plats (t.ex. Låda 12
+  // ligger på Hylla A3). Sparas som en enkel karta i lists, separat från
+  // själva delarna — normaliserad nyckel → fullständig platstext för föräldern.
+  const locationParents = lists?.locationParents || {};
+  const setParent = async (childKey, parentDisplay) => {
+    const next = { ...locationParents };
+    if (parentDisplay) next[childKey] = parentDisplay; else delete next[childKey];
+    await saveLists({ ...lists, locationParents: next });
+    setSettingParentFor(null); setParentPick("");
+    toast$(parentDisplay?`Plats kopplad till ${parentDisplay}`:"Koppling borttagen","success");
+  };
 
   const startMove = (item) => {
     setMovingId(item.id);
@@ -1961,12 +2013,16 @@ function LocationViewPage({ items, saveItems, lists, pop, push, can, isAdmin, to
 
   // Ta bort en plats — rensar location/locationType på ALLA delar som finns
   // där just nu (de hamnar i "Delar utan plats" istället, inte borttappade).
-  const deleteLocation = async (loc) => {
-    const affected = getItems(loc);
+  const deleteLocation = async (locKey, display) => {
+    const affected = getItems(locKey);
     await saveItems(items.map(i => affected.some(a=>a.id===i.id) ? {...i, location:"", locationType:""} : i));
-    toast$(`Platsen "${loc}" borttagen — ${affected.length} delar flyttade till "Delar utan plats"`,"success");
+    if (locationParents[locKey]) {
+      const next = {...locationParents}; delete next[locKey];
+      await saveLists({...lists, locationParents: next});
+    }
+    toast$(`Platsen "${display}" borttagen — ${affected.length} delar flyttade till "Delar utan plats"`,"success");
     setConfirmDeleteLoc(null);
-    if (expanded===loc) setExpanded(null);
+    if (expanded===locKey) setExpanded(null);
   };
 
   // QR-kod för en hel låda/plats — skanna den för att direkt se allt som
@@ -1993,18 +2049,31 @@ function LocationViewPage({ items, saveItems, lists, pop, push, can, isAdmin, to
   };
 
   const locationTypeOptions = lists?.locationTypes || [];
-  // Alla kända fulla platstexter — för snabbval i flytt-panelen
-  const knownLocations = [...new Set(items.map(i=>i.location).filter(Boolean))].sort();
+  // Distinkta platstyper som faktiskt används just nu — för filterchipsen
+  const usedTypes = [...new Set(locations.map(l=>l.locationType).filter(Boolean))].sort((a,b)=>a.localeCompare(b,"sv"));
+  // Alla kända fulla platstexter — för snabbval i flytt-panelen och som
+  // val när man sätter en "ligger på"-koppling
+  const knownLocations = locations.map(l=>l.display).sort((a,b)=>naturalCompare(a,b));
 
   return (
     <Page>
       <TopBar title="Platser" subtitle="Vad finns var" onBack={pop}/>
       <div style={{padding:"14px 14px 40px"}}>
-        <div style={{position:"relative",marginBottom:14}}>
+        <div style={{position:"relative",marginBottom:10}}>
           <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:13,color:MU,pointerEvents:"none"}}><Icon name="magnifying-glass"/></span>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Sök plats, t.ex. Låda 3A…"
             style={{width:"100%",padding:"10px 10px 10px 30px",border:`1.5px solid ${BD}`,borderRadius:8,fontSize:13,boxSizing:"border-box",background:WH}}/>
         </div>
+
+        {/* Filtrera på platstyp — t.ex. bara Hisshylla */}
+        {usedTypes.length>1&&(
+          <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:4,marginBottom:14}}>
+            <button onClick={()=>setTypeFilter("")} style={{flexShrink:0,padding:"6px 14px",borderRadius:16,border:`1.5px solid ${!typeFilter?BX:BD}`,background:!typeFilter?BX:WH,color:!typeFilter?WH:TM,fontSize:12,fontWeight:600,whiteSpace:"nowrap",cursor:"pointer"}}>Alla typer</button>
+            {usedTypes.map(t=>(
+              <button key={t} onClick={()=>setTypeFilter(typeFilter===t?"":t)} style={{flexShrink:0,padding:"6px 14px",borderRadius:16,border:`1.5px solid ${typeFilter===t?BX:BD}`,background:typeFilter===t?BX:WH,color:typeFilter===t?WH:TM,fontSize:12,fontWeight:600,whiteSpace:"nowrap",cursor:"pointer"}}>{t}</button>
+            ))}
+          </div>
+        )}
 
         {/* Genvägar till de två specialsidorna */}
         <div style={{display:"flex",gap:8,marginBottom:14}}>
@@ -2026,20 +2095,29 @@ function LocationViewPage({ items, saveItems, lists, pop, push, can, isAdmin, to
 
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
           {filtered.map(loc => {
-            const locItems = getItems(loc);
-            const isOpen = expanded === loc;
+            const locItems = getItems(loc.key);
+            const isOpen = expanded === loc.key;
+            const parent = locationParents[loc.key];
             return (
-              <div key={loc} style={{background:WH,borderRadius:10,border:`1.5px solid ${isOpen?BX:BD}`,overflow:"hidden"}}>
+              <div key={loc.key} style={{background:WH,borderRadius:10,border:`1.5px solid ${isOpen?BX:BD}`,overflow:"hidden"}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px"}}>
-                  <div onClick={()=>setExpanded(isOpen?null:loc)} style={{display:"flex",alignItems:"center",gap:10,flex:1,cursor:"pointer",minWidth:0}}>
+                  <div onClick={()=>setExpanded(isOpen?null:loc.key)} style={{display:"flex",alignItems:"center",gap:10,flex:1,cursor:"pointer",minWidth:0}}>
                     <i className="fa-solid fa-location-dot" style={{fontSize:14,color:BX,flexShrink:0}}/>
                     <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontWeight:700,fontSize:14,color:BX,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{loc}</div>
-                      <div style={{fontSize:11,color:MU}}>{locItems.length} delar</div>
+                      <div style={{fontWeight:700,fontSize:14,color:BX,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{loc.display}</div>
+                      <div style={{fontSize:11,color:MU}}>
+                        {locItems.length} delar
+                        {parent&&<span> · <i className="fa-solid fa-turn-up" style={{fontSize:9,transform:"rotate(90deg)",display:"inline-block"}}/> ligger på <b style={{color:TX}}>{parent}</b></span>}
+                      </div>
                     </div>
                   </div>
                   {(isAdmin||can("canAdd"))&&(
-                    <button onClick={()=>printBoxLabel(loc,locItems.length)} title="Skriv ut QR-etikett för lådan" style={{background:"none",border:"none",color:MU,cursor:"pointer",padding:6,flexShrink:0}}>
+                    <button onClick={()=>{setSettingParentFor(loc.key);setParentPick(parent||"");}} title="Ange var den här platsen själv finns (t.ex. vilken hylla en låda står på)" style={{background:"none",border:"none",color:parent?BX:MU,cursor:"pointer",padding:6,flexShrink:0}}>
+                      <Icon name="sitemap"/>
+                    </button>
+                  )}
+                  {(isAdmin||can("canAdd"))&&(
+                    <button onClick={()=>printBoxLabel(loc.display,locItems.length)} title="Skriv ut QR-etikett för lådan" style={{background:"none",border:"none",color:MU,cursor:"pointer",padding:6,flexShrink:0}}>
                       <Icon name="qrcode"/>
                     </button>
                   )}
@@ -2048,8 +2126,23 @@ function LocationViewPage({ items, saveItems, lists, pop, push, can, isAdmin, to
                       <Icon name="trash"/>
                     </button>
                   )}
-                  <i onClick={()=>setExpanded(isOpen?null:loc)} className={`fa-solid fa-chevron-${isOpen?"up":"down"}`} style={{fontSize:12,color:MU,cursor:"pointer",flexShrink:0}}/>
+                  <i onClick={()=>setExpanded(isOpen?null:loc.key)} className={`fa-solid fa-chevron-${isOpen?"up":"down"}`} style={{fontSize:12,color:MU,cursor:"pointer",flexShrink:0}}/>
                 </div>
+
+                {/* Inline panel — koppla den här platsen till en "förälder"-plats */}
+                {settingParentFor===loc.key&&(
+                  <div style={{padding:"0 14px 14px",background:BG,borderTop:`1px solid ${BD}`}} onClick={e=>e.stopPropagation()}>
+                    <div style={{fontSize:11,color:MU,margin:"10px 0 6px"}}>Var finns "{loc.display}" själv? (t.ex. vilken hylla en låda står på)</div>
+                    <div style={{display:"flex",gap:8}}>
+                      <input value={parentPick} onChange={e=>setParentPick(e.target.value)} placeholder="T.ex. Hylla A3" list="known-locations"
+                        style={{flex:1,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12}}/>
+                      <Btn small variant="ghost" onClick={()=>setSettingParentFor(null)}>Avbryt</Btn>
+                      {parent&&<Btn small variant="red" onClick={()=>setParent(loc.key,"")}>Ta bort</Btn>}
+                      <Btn small onClick={()=>setParent(loc.key,parentPick.trim())}>Spara</Btn>
+                    </div>
+                  </div>
+                )}
+
                 {isOpen&&(
                   <div style={{borderTop:`1px solid ${BD}`}}>
                     {locItems.map(item=>(
@@ -2057,6 +2150,7 @@ function LocationViewPage({ items, saveItems, lists, pop, push, can, isAdmin, to
                         <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px"}}>
                           <div onClick={()=>push("detail",{item})} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
                             <span style={{background:BX,color:WH,borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:800,flexShrink:0}}>#{item.stockNumber}</span>
+
                             <div style={{flex:1,minWidth:0}}>
                               <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}{item.side?` — ${item.side}`:""}</div>
                               {item.oem&&<div style={{fontSize:10,color:MU,fontFamily:"monospace"}}>{item.oem}</div>}
@@ -2110,13 +2204,13 @@ function LocationViewPage({ items, saveItems, lists, pop, push, can, isAdmin, to
       {confirmDeleteLoc&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}} onClick={()=>setConfirmDeleteLoc(null)}>
           <div onClick={e=>e.stopPropagation()} style={{background:WH,borderRadius:14,padding:20,maxWidth:360,width:"100%"}}>
-            <div style={{fontWeight:700,fontSize:15,marginBottom:8}}>Ta bort platsen "{confirmDeleteLoc}"?</div>
+            <div style={{fontWeight:700,fontSize:15,marginBottom:8}}>Ta bort platsen "{confirmDeleteLoc.display}"?</div>
             <div style={{fontSize:13,color:MU,marginBottom:16}}>
-              {getItems(confirmDeleteLoc).length} delar ligger här just nu. De tas INTE bort — de flyttas till "Delar utan plats", redo att tilldelas en ny plats.
+              {getItems(confirmDeleteLoc.key).length} delar ligger här just nu. De tas INTE bort — de flyttas till "Delar utan plats", redo att tilldelas en ny plats.
             </div>
             <div style={{display:"flex",gap:8}}>
               <Btn full variant="ghost" onClick={()=>setConfirmDeleteLoc(null)}>Avbryt</Btn>
-              <Btn full variant="red" onClick={()=>deleteLocation(confirmDeleteLoc)}>Ta bort plats</Btn>
+              <Btn full variant="red" onClick={()=>deleteLocation(confirmDeleteLoc.key,confirmDeleteLoc.display)}>Ta bort plats</Btn>
             </div>
           </div>
         </div>
@@ -2144,7 +2238,7 @@ function NoLocationPage({ items, saveItems, lists, pop, push, can, isAdmin, toas
   };
 
   const locationTypeOptions = lists?.locationTypes || [];
-  const knownLocations = [...new Set(items.map(i=>i.location).filter(Boolean))].sort();
+  const knownLocations = [...new Set(items.map(i=>i.location).filter(Boolean))].sort((a,b)=>naturalCompare(a,b));
 
   return (
     <Page>
