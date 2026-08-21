@@ -122,6 +122,19 @@ async function sget(k) {
     return r ? JSON.parse(r.value) : null;
   } catch { return null; }
 }
+// Som sget(), men KASTAR ett fel istället för att tyst returnera null om
+// själva förfrågan misslyckas (nätverksstrul, timeout, serverfel) — null
+// betyder därför garanterat "datan finns genuint inte", inte "något gick
+// fel just nu". Används bara för de mest kritiska bootstrap-kontrollerna
+// (användare, delar) där en felaktig "tom → skapa standardvärden"-slutsats
+// annars kan radera riktig data permanent vid en tillfällig störning.
+async function sgetCritical(k) {
+  const res = await fetch(`${API}/${k}`, { headers: authHeaders() });
+  if (res.status === 401) { onSessionExpired?.(); throw new Error("Session utgången"); }
+  if (!res.ok) throw new Error(`HTTP ${res.status} vid hämtning av ${k}`);
+  const r = await res.json();
+  return r ? JSON.parse(r.value) : null;
+}
 async function sset(k,v) {
   try {
     const res = await fetch(`${API}/${k}`, {
@@ -883,8 +896,43 @@ function AppInner() {
     // vid appens allra första start.
     if (!session) { setLoaded(true); return; }
     (async () => {
-      let u  = await sget("ow:users");     if (!u)  { u=[DEFAULT_ADMIN];  await sset("ow:users",u);  }
-      let i  = await sget("ow:items");     if (!i)  { i=DEFAULT_ITEMS;    await sset("ow:items",i);  }
+      // Hämtar användare/delar med upp till 3 försök och sgetCritical —
+      // som skiljer på "genuint tomt" och "förfrågan misslyckades". Bara
+      // om den LYCKAS och datan faktiskt är null/tom skapas standardvärden
+      // — en tillfällig nätverksstrul ska ALDRIG kunna tolkas som "inget
+      // finns" och därmed radera riktiga användare/delar av misstag.
+      const fetchCriticalWithRetry = async (key, retries=3) => {
+        for (let attempt=1; attempt<=retries; attempt++) {
+          try { return await sgetCritical(key); }
+          catch (e) {
+            console.error(`[kritisk hämtning] ${key} misslyckades (försök ${attempt}/${retries}):`, e.message);
+            if (attempt<retries) await new Promise(r=>setTimeout(r,800*attempt));
+          }
+        }
+        throw new Error(`Kunde inte hämta ${key} efter ${retries} försök`);
+      };
+
+      let u, i;
+      try {
+        u = await fetchCriticalWithRetry("ow:users");
+        if (!u) { u=[DEFAULT_ADMIN]; await sset("ow:users",u); }
+      } catch (e) {
+        // Gav upp efter flera försök — visa ett tydligt fel istället för
+        // att gissa och riskera att skriva över riktiga användare.
+        toast$?.("Kunde inte ladda användare — kontrollera anslutningen och ladda om sidan","error");
+        console.error("KRITISKT: kunde inte säkert avgöra om användare finns, avbryter bootstrap.", e);
+        setLoaded(true);
+        return;
+      }
+      try {
+        i = await fetchCriticalWithRetry("ow:items");
+        if (!i) { i=DEFAULT_ITEMS; await sset("ow:items",i); }
+      } catch (e) {
+        toast$?.("Kunde inte ladda delar — kontrollera anslutningen och ladda om sidan","error");
+        console.error("KRITISKT: kunde inte säkert avgöra om delar finns, avbryter bootstrap.", e);
+        setLoaded(true);
+        return;
+      }
       let s  = await sget("ow:sales");     if (!s)  { s=[]; }
       let al = await sget("ow:activitylog"); if (!al) { al=[]; }
       let tr = await sget("ow:trash"); if (!tr) { tr=[]; }
@@ -1961,6 +2009,10 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
   const [confirmDeleteLoc, setConfirmDeleteLoc] = useState(null);
   const [settingParentFor, setSettingParentFor] = useState(null); // vilken plats-grupp som just nu väljer sin "ligger på"-plats
   const [parentPick, setParentPick] = useState("");
+  const [renamingKey, setRenamingKey] = useState(null); // vilken plats-grupp som just nu byter namn
+  const [renameType, setRenameType] = useState("");
+  const [renameLoc, setRenameLoc] = useState("");
+  const [renameParent, setRenameParent] = useState("");
 
   const norm = s => (s||"").trim().toLowerCase();
   // En plats identifieras av TYP + NAMN + VAR DEN SJÄLV FINNS (parentLocation)
@@ -2014,6 +2066,26 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
     await saveItems(items.map(i => i.id===item.id ? {...i, locationType:moveType, location:moveLoc, parentLocation:moveParent} : i));
     toast$(`${item.name} flyttad till ${[moveType,moveLoc].filter(Boolean).join(" — ")||"ingen plats"}`,"success");
     cancelMove();
+  };
+
+  // Byt namn på en HEL plats i ett svep — uppdaterar alla delar som ligger
+  // där just nu till de nya värdena, istället för att behöva flytta varje
+  // del för sig via den vanliga flytt-panelen.
+  const startRename = (loc) => {
+    const sample = getItems(loc.key)[0];
+    setRenamingKey(loc.key);
+    setRenameType(sample?.locationType||"");
+    setRenameLoc(sample?.location||"");
+    setRenameParent(loc.parent||"");
+  };
+  const cancelRename = () => { setRenamingKey(null); setRenameType(""); setRenameLoc(""); setRenameParent(""); };
+  const confirmRename = async (locKey) => {
+    if (!renameLoc.trim()) { toast$("Ange ett namn","error"); return; }
+    const affected = getItems(locKey);
+    await saveItems(items.map(i => affected.some(a=>a.id===i.id) ? {...i, locationType:renameType, location:renameLoc, parentLocation:renameParent} : i));
+    toast$(`${affected.length} delar uppdaterade till "${[renameType,renameLoc].filter(Boolean).join(" — ")}"`,"success");
+    cancelRename();
+    if (expanded===locKey) setExpanded(null);
   };
 
   // Ta bort en plats — rensar location/locationType/parentLocation på ALLA
@@ -2112,6 +2184,11 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
                       </div>
                     </div>
                   </div>
+                  {(isAdmin||can("canEdit"))&&(
+                    <button onClick={()=>renamingKey===loc.key?cancelRename():startRename(loc)} title="Byt namn på hela platsen (alla delar här flyttas till det nya namnet på en gång)" style={{background:"none",border:"none",color:renamingKey===loc.key?BX:MU,cursor:"pointer",padding:6,flexShrink:0}}>
+                      <Icon name="pen"/>
+                    </button>
+                  )}
                   {(isAdmin||can("canAdd"))&&(
                     <button onClick={()=>{setSettingParentFor(loc.key);setParentPick(parent||"");}} title="Ange var den här platsen själv finns (t.ex. vilken hylla en låda står på)" style={{background:"none",border:"none",color:parent?BX:MU,cursor:"pointer",padding:6,flexShrink:0}}>
                       <Icon name="sitemap"/>
@@ -2129,6 +2206,27 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
                   )}
                   <i onClick={()=>setExpanded(isOpen?null:loc.key)} className={`fa-solid fa-chevron-${isOpen?"up":"down"}`} style={{fontSize:12,color:MU,cursor:"pointer",flexShrink:0}}/>
                 </div>
+
+                {/* Inline panel — byt namn på HELA platsen, uppdaterar alla delar här på en gång */}
+                {renamingKey===loc.key&&(
+                  <div style={{padding:"0 14px 14px",background:BG,borderTop:`1px solid ${BD}`}} onClick={e=>e.stopPropagation()}>
+                    <div style={{fontSize:11,color:MU,margin:"10px 0 6px"}}>Byt namn — uppdaterar alla {locItems.length} delar i "{loc.display}" på en gång</div>
+                    <div style={{display:"flex",gap:8,marginBottom:8}}>
+                      <select value={renameType} onChange={e=>setRenameType(e.target.value)} style={{flex:1,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12,background:WH}}>
+                        <option value="">Typ (valfritt)</option>
+                        {locationTypeOptions.filter(Boolean).map(t=><option key={t} value={t}>{t}</option>)}
+                      </select>
+                      <input value={renameLoc} onChange={e=>setRenameLoc(e.target.value)} placeholder="Nytt namn, t.ex. 3A" autoFocus
+                        style={{flex:1.4,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12}}/>
+                    </div>
+                    <input value={renameParent} onChange={e=>setRenameParent(e.target.value)} placeholder="Var finns platsen? (valfritt)" list="known-locations"
+                      style={{width:"100%",padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12,marginBottom:8,boxSizing:"border-box"}}/>
+                    <div style={{display:"flex",gap:8}}>
+                      <Btn small variant="ghost" onClick={cancelRename}>Avbryt</Btn>
+                      <Btn small onClick={()=>confirmRename(loc.key)}>Byt namn på alla {locItems.length}</Btn>
+                    </div>
+                  </div>
+                )}
 
                 {/* Inline panel — koppla den här platsen till en "förälder"-plats */}
                 {settingParentFor===loc.key&&(
@@ -8637,6 +8735,7 @@ function ProfilePage({ currentUser, users, saveUsers, pop, toast$, theme, setThe
 
   const [email, setEmail] = useState(currentUser.email || "");
   const [phone, setPhone] = useState(currentUser.phone || "");
+  const [notifyOther, setNotifyOther] = useState(!!currentUser.notifyOtherWarehouseReservations);
   const [oldPw, setOldPw] = useState("");
   const [newPw, setNewPw] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
@@ -8648,6 +8747,14 @@ function ProfilePage({ currentUser, users, saveUsers, pop, toast$, theme, setThe
     await saveUsers(users.map(u => u.id===currentUser.id ? {...u, email:email.trim(), phone:phone.trim()} : u));
     setSaving(false);
     toast$("Kontaktuppgifter sparade","success");
+  };
+
+  const toggleNotify = async () => {
+    const next = !notifyOther;
+    if (next && !email.trim()) { toast$("Fyll i och spara en e-postadress först","error"); return; }
+    setNotifyOther(next);
+    await saveUsers(users.map(u => u.id===currentUser.id ? {...u, notifyOtherWarehouseReservations:next} : u));
+    toast$(next?"Du får nu mejl vid reservationer på andra lager":"Avstängt","success");
   };
 
   const savePassword = async () => {
@@ -8705,6 +8812,23 @@ function ProfilePage({ currentUser, users, saveUsers, pop, toast$, theme, setThe
             <Btn onClick={saveContact} disabled={saving}><Icon name="check"/> Spara kontaktuppgifter</Btn>
           </div>
         </div>
+
+        {/* Notiser — endast relevant för den som tillhör ett specifikt lager */}
+        {currentUser.homeWarehouse&&(
+          <div style={{background:WH,borderRadius:10,border:`1px solid ${BD}`,padding:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:12}}>Notiser</div>
+            <div onClick={toggleNotify} style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:600,fontSize:13.5}}>Mejla mig vid reservationer från andra lager</div>
+                <div style={{fontSize:12,color:MU,marginTop:2}}>Om någon utanför {currentUser.homeWarehouse} reserverar en del som tillhör {currentUser.homeWarehouse}, får du ett mejl om det.</div>
+              </div>
+              <div style={{width:42,height:24,borderRadius:12,background:notifyOther?BX:BD,position:"relative",transition:"background .2s",flexShrink:0}}>
+                <div style={{position:"absolute",top:3,left:notifyOther?20:3,width:18,height:18,borderRadius:"50%",background:WH,boxShadow:"0 1px 3px rgba(0,0,0,.2)",transition:"left .2s"}}/>
+              </div>
+            </div>
+            {!email.trim()&&<div style={{fontSize:11,color:AM,marginTop:10}}><Icon name="triangle-exclamation" style={{marginRight:4}}/>Kräver en sparad e-postadress ovan</div>}
+          </div>
+        )}
 
         {/* Byt lösenord */}
         <div style={{background:WH,borderRadius:10,border:`1px solid ${BD}`,padding:16}}>
