@@ -875,15 +875,23 @@ function AppInner() {
   // ── Delbara länkar — synkar adressfältet med ?item=ID när en artikel visas ──
   // Gör att man kan kopiera URL:en och dela en specifik del med kollegor,
   // och att den artikeln öppnas direkt om länken klistras in i webbläsaren.
+  const urlSyncFirstRun = useRef(true);
   useEffect(() => {
     try {
       const url = new URL(window.location.href);
       if (current.name === "detail" && current.props?.item?.id) {
         url.searchParams.set("item", current.props.item.id);
-      } else {
+        window.history.replaceState(null, "", url.toString());
+      } else if (!urlSyncFirstRun.current) {
+        // VIKTIGT: rensar INTE ?item= på appens allra FÖRSTA render. Annars
+        // hinner den här koden radera parametern innan den separata
+        // sharedLinkHandled-effekten (som väntar på att "items" laddats)
+        // ens fått chansen att läsa den — en delad länk raderades av vår
+        // EGEN städlogik innan appen visste att den skulle öppna den.
         url.searchParams.delete("item");
+        window.history.replaceState(null, "", url.toString());
       }
-      window.history.replaceState(null, "", url.toString());
+      urlSyncFirstRun.current = false;
     } catch {}
   }, [current]);
 
@@ -2059,8 +2067,19 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
     .map(([key,g]) => ({ key, display:g.display, parent:g.parent, locationType: items.find(i=>norm(fullKey(i))===key)?.locationType||"" }))
     .sort((a,b)=>naturalCompare(a.display,b.display) || naturalCompare(a.parent,b.parent));
 
+  // Smart sökning — strular inte över tankstreck/bindestreck i visningen
+  // ("Låda — 22" hittas även om man söker "Låda 22" utan streck), och
+  // bryr sig inte om i vilken ordning orden skrivs in ("22 Låda" hittar
+  // också "Låda — 22").
+  const normalizeForSearch = s => (s||"").toLowerCase().replace(/[-—–_]/g," ").replace(/\s+/g," ").trim();
+  const matchesSearch = (target, query) => {
+    const nq = normalizeForSearch(query);
+    if (!nq) return true;
+    const nt = normalizeForSearch(target);
+    return nq.split(" ").every(word => nt.includes(word));
+  };
   const filtered = locations.filter(l =>
-    (!search || l.display.toLowerCase().includes(search.toLowerCase()) || l.parent.toLowerCase().includes(search.toLowerCase())) &&
+    (!search || matchesSearch(l.display, search) || matchesSearch(l.parent, search)) &&
     (!typeFilter || l.locationType === typeFilter)
   );
   const getItems = (locKey) => items.filter(i => norm(fullKey(i)) === locKey);
@@ -2129,23 +2148,24 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
 
   // QR-kod för en hel låda/plats — skanna den för att direkt se allt som
   // finns där (se ScanPage, som känner igen prefixet "LAGERBOX:").
+  // Platsens namn är det viktiga och ska synas tydligt på långt håll —
+  // antalet delar skrivs INTE ut, det ändras hela tiden och skulle vara
+  // fel igen nästan direkt. QR-koden är bara ett litet skannbart hjälpmedel.
   const printBoxLabel = (loc, count) => {
     const qrData = `LAGERBOX:${loc}`;
-    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(qrData)}`;
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`;
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Låd-QR — ${loc}</title>
     <style>
       @page{size:A6;margin:0}
       *{box-sizing:border-box}
-      body{font-family:'Segoe UI',Arial,sans-serif;margin:0;padding:10mm;text-align:center;color:#141820}
-      .name{font-size:22px;font-weight:800;color:#1B3A6B;margin-bottom:6mm;word-break:break-word}
-      .sub{font-size:12px;color:#888;margin-bottom:6mm}
-      img{width:55mm;height:55mm}
-      .hint{font-size:11px;color:#888;margin-top:6mm}
+      body{font-family:'Segoe UI',Arial,sans-serif;margin:0;padding:10mm;text-align:center;color:#141820;display:flex;flex-direction:column;align-items:center;justify-content:center;height:148mm}
+      .name{font-size:44px;font-weight:900;color:#1B3A6B;line-height:1.05;word-break:break-word;margin-bottom:10mm}
+      img{width:22mm;height:22mm}
+      .hint{font-size:10px;color:#aaa;margin-top:4mm}
     </style></head><body>
       <div class="name">${loc}</div>
-      <div class="sub">${count} delar i lådan</div>
       <img src="${qrUrl}"/>
-      <div class="hint">Skanna för att se allt i lådan</div>
+      <div class="hint">Skanna för innehåll</div>
     </body></html>`;
     printHtml(html);
   };
@@ -2381,12 +2401,11 @@ function LocationQrLabelsPage({ pop, toast$, locations }) {
 
     const pages = toPrint.map(l => {
       const qrData = `LAGERBOX:${l.display}`;
-      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(qrData)}`;
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`;
       return `<div class="page">
         <div class="name">${l.display}</div>
-        <div class="sub">${l.count} delar i lådan</div>
         <img src="${qrUrl}"/>
-        <div class="hint">Skanna för att se allt i lådan</div>
+        <div class="hint">Skanna för innehåll</div>
       </div>`;
     }).join("");
 
@@ -2396,10 +2415,9 @@ function LocationQrLabelsPage({ pop, toast$, locations }) {
       *{box-sizing:border-box}
       body{font-family:'Segoe UI',Arial,sans-serif;margin:0;padding:0;color:#141820}
       .page{width:105mm;height:148mm;padding:10mm;text-align:center;page-break-after:always;display:flex;flex-direction:column;align-items:center;justify-content:center}
-      .name{font-size:22px;font-weight:800;color:#1B3A6B;margin-bottom:6mm;word-break:break-word}
-      .sub{font-size:12px;color:#888;margin-bottom:6mm}
-      img{width:55mm;height:55mm}
-      .hint{font-size:11px;color:#888;margin-top:6mm}
+      .name{font-size:44px;font-weight:900;color:#1B3A6B;line-height:1.05;word-break:break-word;margin-bottom:10mm}
+      img{width:22mm;height:22mm}
+      .hint{font-size:10px;color:#aaa;margin-top:4mm}
     </style></head><body>${pages}
     <script>window.addEventListener('load',function(){setTimeout(function(){window.print();},400);});</script></body></html>`;
     printHtml(html);
@@ -3867,10 +3885,13 @@ function BulkEditPage({ items, saveItems, lists, pop, toast$, can, isAdmin, curr
     if (!search) return true;
     const q = search.toLowerCase();
     if (searchScope==="stock") {
-      // Bara lagernummer — exakt eller delmatchning, samt komma-separerade ("11, 15")
+      // Bara lagernummer — EXAKT matchning, inte delmatchning. Annars
+      // matchar t.ex. "8" mot 18, 28, 80, 800... vilket ger dussintals
+      // felaktiga träffar i en massredigering där precision är avgörande.
+      // Stödjer fortfarande flera exakta nummer kommaseparerat ("11, 15").
       const nums = q.split(",").map(s=>s.trim()).filter(Boolean);
       const sn = (i.stockNumber||"").toLowerCase();
-      return nums.some(n => sn===n || sn.includes(n));
+      return nums.some(n => sn===n);
     }
     return [i.name,i.sku,i.oem,i.stockNumber,i.category,i.regNumber,i.location,i.make,i.model,...(i.alternativeNumbers||[])].some(f=>f?.toLowerCase().includes(q));
   });
@@ -3955,7 +3976,7 @@ function BulkEditPage({ items, saveItems, lists, pop, toast$, can, isAdmin, curr
           <button onClick={()=>setSearchScope("stock")} style={{flex:1,padding:"7px",borderRadius:6,border:"none",background:searchScope==="stock"?WH:"transparent",color:searchScope==="stock"?BX:MU,fontWeight:700,fontSize:12,boxShadow:searchScope==="stock"?SH:"none",cursor:"pointer"}}>Bara lagernummer</button>
         </div>
         <div style={{display:"flex",gap:8,marginBottom:10,alignItems:"center"}}>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder={searchScope==="stock"?"Lagernr (t.ex. 11, 15, 23)":"Sök (namn, lagernr, artikelnr, regnr...)"} style={{flex:1,padding:"9px 12px",border:`1.5px solid ${searchScope==="stock"?BX:BD}`,borderRadius:8,fontSize:13,background:searchScope==="stock"?B+"06":WH}}/>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder={searchScope==="stock"?"Exakt lagernr (t.ex. 11, 15, 23)":"Sök (namn, lagernr, artikelnr, regnr...)"} style={{flex:1,padding:"9px 12px",border:`1.5px solid ${searchScope==="stock"?BX:BD}`,borderRadius:8,fontSize:13,background:searchScope==="stock"?B+"06":WH}}/>
           <button onClick={selAll} style={{flexShrink:0,padding:"9px 12px",borderRadius:8,border:`1.5px solid ${BD}`,background:WH,fontSize:12,fontWeight:600,cursor:"pointer",color:BX}}>Alla</button>
           <button onClick={()=>setSelected(new Set())} style={{flexShrink:0,padding:"9px 12px",borderRadius:8,border:`1.5px solid ${BD}`,background:WH,fontSize:12,fontWeight:600,cursor:"pointer",color:MU}}>Rensa</button>
         </div>
