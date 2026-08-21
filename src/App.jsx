@@ -48,6 +48,31 @@ function setCurrentToken(token) { CURRENT_TOKEN = token || null; }
 // användaren så de inte sitter fast i ett trasigt läge.
 let onSessionExpired = null;
 function setOnSessionExpired(fn) { onSessionExpired = fn; }
+
+// ── Globalt sparskydd ──────────────────────────────────────────────────────
+// Samma mönster som onSessionExpired ovan — en modul-nivå-callback som kan
+// nås från VILKEN funktion som helst i filen, inte bara från React-
+// komponenter. Räknar hur många skriv-anrop mot servern som pågår just nu.
+// Så länge räknaren är > 0 visas en helskärmsspärr som blockerar all
+// interaktion — man kan alltså aldrig dubbelklicka "Spara" eller "Ta bort"
+// och råka skapa dubbletter, oavsett VAR i appen det händer. Byggd in på
+// den lägsta nivån (busyFetch nedan, som alla skriv-anrop går igenom) så
+// den täcker automatiskt allt som kräver serveråtkomst — även sådant som
+// läggs till i appen senare, utan att varje enskild knapp behöver komma
+// ihåg att koppla in sig manuellt.
+let busyCount = 0;
+let setBusyCount = null;
+function registerBusySetter(fn) { setBusyCount = fn; }
+function busyStart() { busyCount++; setBusyCount?.(busyCount); }
+function busyEnd() { busyCount = Math.max(0, busyCount-1); setBusyCount?.(busyCount); }
+// Slår in busyStart/busyEnd runt ett fetch-löfte — läsningar (GET) blockerar
+// INTE skärmen (de sker hela tiden i bakgrunden, t.ex. polling, och skulle
+// göra appen irriterande flimmrig om varje sådan blockerade allt). Bara
+// skriv-operationer (spara, ta bort, logga in, återställ m.m.) blockerar.
+function busyFetch(promise) {
+  busyStart();
+  return promise.finally(busyEnd);
+}
 function authHeaders(base = {}) {
   const h = { ...base };
   if (CURRENT_USERNAME) h["x-lager-user"] = encodeURIComponent(CURRENT_USERNAME);
@@ -136,6 +161,7 @@ async function sgetCritical(k) {
   return r ? JSON.parse(r.value) : null;
 }
 async function sset(k,v) {
+  busyStart();
   try {
     const res = await fetch(`${API}/${k}`, {
       method:"POST",
@@ -151,39 +177,42 @@ async function sset(k,v) {
   } catch (e) {
     console.error(`Sparning misslyckades för ${k}:`, e.message);
     return false;
-  }
+  } finally { busyEnd(); }
 }
 
 // Item-level: uppdatera/lägg till EN artikel utan att skriva över andras ändringar
 async function saveOneItem(item) {
+  busyStart();
   try {
     const r = await fetch(`${API}/item/upsert`, {
       method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ item })
     }).then(r=>r.json());
     return r.items || null;
-  } catch { return null; }
+  } catch { return null; } finally { busyEnd(); }
 }
 // Item-level: ta bort EN artikel
 async function deleteOneItem(id) {
+  busyStart();
   try {
     const r = await fetch(`${API}/item/delete`, {
       method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ id })
     }).then(r=>r.json());
     return r.items || null;
-  } catch { return null; }
+  } catch { return null; } finally { busyEnd(); }
 }
 // Mjuk borttagning — tas bort från lagerlistan men bilderna behålls på servern,
 // så artikeln går att återställa helt (med bilder) från Papperskorgen i 30 dagar.
 async function softDeleteOneItem(id) {
+  busyStart();
   try {
     const r = await fetch(`${API}/item/soft-delete`, {
       method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ id })
     }).then(r=>r.json());
     return r.items || null;
-  } catch { return null; }
+  } catch { return null; } finally { busyEnd(); }
 }
 
 // Bilder — hämta för en artikel
@@ -195,13 +224,14 @@ async function getImages(id) {
 }
 // Bilder — spara för en artikel
 async function setImages(id, images) {
+  busyStart();
   try {
     const r = await fetch(`${API}/images/${id}`, {
       method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
       body: JSON.stringify({ images })
     });
     return r.ok;
-  } catch { return false; }
+  } catch { return false; } finally { busyEnd(); }
 }
 
 // ── Redigeringslås — hindrar två användare från att ändra samma del samtidigt ──
@@ -491,6 +521,7 @@ select option{background:${WH};color:${TX};}
 ::-webkit-scrollbar{width:6px} ::-webkit-scrollbar-thumb{background:#ccc;border-radius:3px}
 @keyframes slideIn{from{opacity:0;transform:translateX(18px)}to{opacity:1;transform:none}}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes spin{to{transform:rotate(360deg)}}
 .page{animation:slideIn .2s ease both;}
 .fade{animation:fadeIn .15s ease both;}
 
@@ -1097,12 +1128,10 @@ function AppInner() {
     // Bilderna ligger kvar orörda på servern (soft-delete rör dem inte) — vi
     // sparar bara metadata i papperskorgen, annars blir den onödigt tung.
     const entries = arr.map(it => ({ ...it, images: [], deletedAt: Date.now(), deletedBy: deletedBy || "Okänd" }));
-    setTrash(prev => {
-      const next = [...entries, ...prev];
-      sset("ow:trash", next);
-      return next;
-    });
-  }, []);
+    const next = [...entries, ...trash];
+    setTrash(next);
+    await sset("ow:trash", next);
+  }, [trash]);
   const saveFavorites = useCallback(async v => { setFavorites(v);await sset("ow:favorites",v); }, []);
 
   const logActivity = useCallback(async (type, description, extra={}) => {
@@ -1163,6 +1192,13 @@ function AppInner() {
       setStack([{ name:"login" }]);
     });
   }, []);
+
+  // Kopplar in den globala sparspärren (se registerBusySetter/busyStart/
+  // busyEnd överst i filen) mot ett riktigt React-state, så en helskärms-
+  // spärr kan visas medan NÅGOT skriv-anrop pågår mot servern — var som
+  // helst i appen, oavsett vilken sida eller funktion som orsakade det.
+  const [busyCount, setBusyCountState] = useState(0);
+  useEffect(() => { registerBusySetter(setBusyCountState); return () => registerBusySetter(null); }, []);
 
   // ── Tema (mörkt/ljust/system) — sparas per enhet, inte per användare ──
   const [theme, setTheme] = useState(() => {
@@ -1262,6 +1298,18 @@ function AppInner() {
   return (
     <div style={{position:"fixed",inset:0,overflow:"hidden",background:BG,display:"flex",flexDirection:"column"}}>
       <style>{CSS}</style>
+
+      {/* Global sparspärr — blockerar ALL interaktion medan ett skriv-anrop
+          pågår mot servern, var det än sker i appen. Förhindrar dubbelklick
+          som annars skulle kunna skapa dubbletter eller krascha något. */}
+      {busyCount>0 && (
+        <div style={{position:"fixed",inset:0,zIndex:9999,background:"rgba(20,24,32,.15)",display:"flex",alignItems:"center",justifyContent:"center",cursor:"wait"}}>
+          <div style={{background:WH,borderRadius:14,padding:"18px 28px",display:"flex",alignItems:"center",gap:14,boxShadow:SH2}}>
+            <div style={{width:22,height:22,border:`3px solid ${BD}`,borderTopColor:BX,borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
+            <span style={{fontSize:14,fontWeight:600,color:TX}}>Sparar…</span>
+          </div>
+        </div>
+      )}
 
       {toast && (
         <div className="fade" style={{position:"fixed",bottom:20,left:"50%",transform:"translateX(-50%)",background:toast.type==="error"?R:toast.type==="success"?GR:BX,color:"#fff",padding:"10px 20px",borderRadius:8,zIndex:999,fontSize:13,fontWeight:500,boxShadow:SH2,whiteSpace:"nowrap",pointerEvents:"none"}}>
@@ -4315,10 +4363,10 @@ function BackupPage({ items, sales, users, settings, suppliers, roles, lists, ac
   const doFactoryReset = async () => {
     setResetting(true);
     try {
-      const r = await fetch(`${API}/factory-reset`, {
+      const r = await busyFetch(fetch(`${API}/factory-reset`, {
         method:"POST", headers: authHeaders({"Content-Type":"application/json"}),
         body: JSON.stringify({ confirm: resetConfirmText.trim() }),
-      }).then(r=>r.json());
+      })).then(r=>r.json());
       if (!r.ok) {
         toast$(r.error||"Kunde inte återställa","error");
       } else {
@@ -4378,6 +4426,7 @@ function BackupPage({ items, sales, users, settings, suppliers, roles, lists, ac
   const doRestore = async (file) => {
     if (!file) return;
     setRestoring(true);
+    busyStart(); // täcker HELA återställningen (alla batchar) i ett svep, inte flimrande mellan varje
     try {
       const text = await file.text();
       const data = JSON.parse(text);
@@ -4434,6 +4483,7 @@ function BackupPage({ items, sales, users, settings, suppliers, roles, lists, ac
     } catch(e) {
       toast$("Fel: "+e.message,"error");
     }
+    busyEnd();
     setRestoring(false);
     setRestoreProgress(0);
   };
@@ -9006,10 +9056,10 @@ function ProfilePage({ currentUser, users, saveUsers, pop, toast$, theme, setThe
     if (newPw !== confirmPw) { toast$("De nya lösenorden matchar inte","error"); return; }
     setSaving(true);
     try {
-      const r = await fetch(`${API}/change-own-password`, {
+      const r = await busyFetch(fetch(`${API}/change-own-password`, {
         method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ oldPassword: oldPw.trim(), newPassword: newPw.trim() }),
-      }).then(r => r.json());
+      })).then(r => r.json());
       if (!r.ok) {
         toast$(r.error || "Kunde inte byta lösenord", "error");
       } else {
