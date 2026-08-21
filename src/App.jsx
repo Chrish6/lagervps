@@ -961,17 +961,35 @@ function AppInner() {
       lastSyncRef.current = Array.isArray(i) ? i.reduce((a,it)=>Math.max(a,it.updatedAt||0),0) : 0;
 
       setUsers(u); setItems(i); setSales(s); setActivityLog(al); setTrash(tr); setSettings(st); setSuppliers(sup); setCustomers(cust); setFavorites(fav); setRoles(rl); setLists(lst); setLoaded(true);
-
-      // Öppna direkt på artikeln om URL:en innehåller ?item=ID (delad länk)
-      try {
-        const sharedId = new URL(window.location.href).searchParams.get("item");
-        if (sharedId) {
-          const found = i.find(x=>x.id===sharedId);
-          if (found) setStack([{ name:"inventory" }, { name:"detail", props:{item:found} }]);
-        }
-      } catch {}
     })();
   }, [session]);
+
+  // Öppna direkt på en delad artikel om URL:en innehåller ?item=ID — en
+  // EGEN, oberoende effekt (körs varje gång "items" fylls i, oavsett om
+  // man precis loggat in eller redan var inloggad). Tidigare låg detta
+  // begravt inuti inloggnings-laddningen och kunde skrivas över av
+  // LoginPages egen navigering (replace("inventory")) om man klickade
+  // länken innan man var inloggad — då hann inloggningen sätta stacken
+  // FÖRE datan (och därmed den delade artikeln) hunnit laddas klart.
+  // sharedLinkHandled.current säkerställer att detta bara sker EN gång,
+  // inte varje gång "items" uppdateras i bakgrunden (t.ex. delta-synk).
+  const sharedLinkHandled = useRef(false);
+  useEffect(() => {
+    if (sharedLinkHandled.current) return;
+    if (!Array.isArray(items) || items.length===0) return;
+    try {
+      const sharedId = new URL(window.location.href).searchParams.get("item");
+      if (!sharedId) { sharedLinkHandled.current = true; return; }
+      const found = items.find(x=>x.id===sharedId);
+      if (found) {
+        setStack([{ name:"inventory" }, { name:"detail", props:{item:found} }]);
+        sharedLinkHandled.current = true;
+      }
+      // Om artikeln inte hittades än väntar vi — kan bero på att bara en
+      // delmängd av delarna hunnit laddas. Försöker igen nästa gång
+      // "items" uppdateras, tills den hittas eller sidan lämnas.
+    } catch { sharedLinkHandled.current = true; }
+  }, [items]);
 
   // Håll en ref till stack så polling-intervallet aldrig återskapas
   const stackRef = useRef(stack);
@@ -1297,6 +1315,7 @@ function AppInner() {
           {current.name === "receipt"      && <ReceiptPage      {...sharedProps} {...current.props} />}
           {current.name === "qrlabels"     && <QrLabelsPage     {...sharedProps} {...current.props} />}
           {current.name === "locationview"  && <LocationViewPage {...sharedProps} {...current.props} />}
+          {current.name === "locationqr"    && <LocationQrLabelsPage {...sharedProps} {...current.props} />}
           {current.name === "nolocation"    && <NoLocationPage    {...sharedProps} />}
           {current.name === "missingitems"  && <MissingItemsPage  {...sharedProps} />}
           {current.name === "import"       && <ImportPage       {...sharedProps} />}
@@ -2007,6 +2026,8 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
   const [moveLoc, setMoveLoc] = useState("");
   const [moveParent, setMoveParent] = useState("");
   const [confirmDeleteLoc, setConfirmDeleteLoc] = useState(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedLocs, setSelectedLocs] = useState(new Set());
   const [settingParentFor, setSettingParentFor] = useState(null); // vilken plats-grupp som just nu väljer sin "ligger på"-plats
   const [parentPick, setParentPick] = useState("");
   const [renamingKey, setRenamingKey] = useState(null); // vilken plats-grupp som just nu byter namn
@@ -2098,6 +2119,14 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
     if (expanded===locKey) setExpanded(null);
   };
 
+  const toggleSelectLoc = (key) => setSelectedLocs(s => { const n=new Set(s); n.has(key)?n.delete(key):n.add(key); return n; });
+  const exitSelectMode = () => { setSelectMode(false); setSelectedLocs(new Set()); };
+  const goToQrPage = () => {
+    const chosen = locations.filter(l=>selectedLocs.has(l.key)).map(l=>({key:l.key, display:l.display, count:getItems(l.key).length}));
+    push("locationqr", { locations: chosen });
+    exitSelectMode();
+  };
+
   // QR-kod för en hel låda/plats — skanna den för att direkt se allt som
   // finns där (se ScanPage, som känner igen prefixet "LAGERBOX:").
   const printBoxLabel = (loc, count) => {
@@ -2130,7 +2159,8 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
 
   return (
     <Page>
-      <TopBar title="Platser" subtitle="Vad finns var" onBack={pop}/>
+      <TopBar title="Platser" subtitle="Vad finns var" onBack={pop}
+        right={<button onClick={()=>selectMode?exitSelectMode():setSelectMode(true)} style={{background:"none",border:"none",color:selectMode?R:BX,fontWeight:700,fontSize:13,cursor:"pointer"}}>{selectMode?"Avbryt":"Välj"}</button>}/>
       <div style={{padding:"14px 14px 40px"}}>
         <div style={{position:"relative",marginBottom:10}}>
           <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:13,color:MU,pointerEvents:"none"}}><Icon name="magnifying-glass"/></span>
@@ -2171,11 +2201,18 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
             const locItems = getItems(loc.key);
             const isOpen = expanded === loc.key;
             const parent = loc.parent;
+            const isSelected = selectedLocs.has(loc.key);
             return (
-              <div key={loc.key} style={{background:WH,borderRadius:10,border:`1.5px solid ${isOpen?BX:BD}`,overflow:"hidden"}}>
+              <div key={loc.key} style={{background:WH,borderRadius:10,border:`1.5px solid ${selectMode?(isSelected?BX:BD):(isOpen?BX:BD)}`,overflow:"hidden"}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px"}}>
-                  <div onClick={()=>setExpanded(isOpen?null:loc.key)} style={{display:"flex",alignItems:"center",gap:10,flex:1,cursor:"pointer",minWidth:0}}>
-                    <i className="fa-solid fa-location-dot" style={{fontSize:14,color:BX,flexShrink:0}}/>
+                  <div onClick={()=>selectMode?toggleSelectLoc(loc.key):setExpanded(isOpen?null:loc.key)} style={{display:"flex",alignItems:"center",gap:10,flex:1,cursor:"pointer",minWidth:0}}>
+                    {selectMode?(
+                      <div style={{width:20,height:20,borderRadius:5,border:`2px solid ${isSelected?BX:BD}`,background:isSelected?BX:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                        {isSelected&&<Icon name="check" style={{color:WH,fontSize:11}}/>}
+                      </div>
+                    ):(
+                      <i className="fa-solid fa-location-dot" style={{fontSize:14,color:BX,flexShrink:0}}/>
+                    )}
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontWeight:700,fontSize:14,color:BX,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{loc.display}</div>
                       <div style={{fontSize:11,color:MU}}>
@@ -2184,31 +2221,31 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
                       </div>
                     </div>
                   </div>
-                  {(isAdmin||can("canEdit"))&&(
+                  {!selectMode&&(isAdmin||can("canEdit"))&&(
                     <button onClick={()=>renamingKey===loc.key?cancelRename():startRename(loc)} title="Byt namn på hela platsen (alla delar här flyttas till det nya namnet på en gång)" style={{background:"none",border:"none",color:renamingKey===loc.key?BX:MU,cursor:"pointer",padding:6,flexShrink:0}}>
                       <Icon name="pen"/>
                     </button>
                   )}
-                  {(isAdmin||can("canAdd"))&&(
+                  {!selectMode&&(isAdmin||can("canAdd"))&&(
                     <button onClick={()=>{setSettingParentFor(loc.key);setParentPick(parent||"");}} title="Ange var den här platsen själv finns (t.ex. vilken hylla en låda står på)" style={{background:"none",border:"none",color:parent?BX:MU,cursor:"pointer",padding:6,flexShrink:0}}>
                       <Icon name="sitemap"/>
                     </button>
                   )}
-                  {(isAdmin||can("canAdd"))&&(
+                  {!selectMode&&(isAdmin||can("canAdd"))&&(
                     <button onClick={()=>printBoxLabel(loc.display,locItems.length)} title="Skriv ut QR-etikett för lådan" style={{background:"none",border:"none",color:MU,cursor:"pointer",padding:6,flexShrink:0}}>
                       <Icon name="qrcode"/>
                     </button>
                   )}
-                  {(isAdmin||can("canDelete"))&&(
+                  {!selectMode&&(isAdmin||can("canDelete"))&&(
                     <button onClick={()=>setConfirmDeleteLoc(loc)} title="Ta bort platsen" style={{background:"none",border:"none",color:MU,cursor:"pointer",padding:6,flexShrink:0}}>
                       <Icon name="trash"/>
                     </button>
                   )}
-                  <i onClick={()=>setExpanded(isOpen?null:loc.key)} className={`fa-solid fa-chevron-${isOpen?"up":"down"}`} style={{fontSize:12,color:MU,cursor:"pointer",flexShrink:0}}/>
+                  {!selectMode&&<i onClick={()=>setExpanded(isOpen?null:loc.key)} className={`fa-solid fa-chevron-${isOpen?"up":"down"}`} style={{fontSize:12,color:MU,cursor:"pointer",flexShrink:0}}/>}
                 </div>
 
                 {/* Inline panel — byt namn på HELA platsen, uppdaterar alla delar här på en gång */}
-                {renamingKey===loc.key&&(
+                {!selectMode&&renamingKey===loc.key&&(
                   <div style={{padding:"0 14px 14px",background:BG,borderTop:`1px solid ${BD}`}} onClick={e=>e.stopPropagation()}>
                     <div style={{fontSize:11,color:MU,margin:"10px 0 6px"}}>Byt namn — uppdaterar alla {locItems.length} delar i "{loc.display}" på en gång</div>
                     <div style={{display:"flex",gap:8,marginBottom:8}}>
@@ -2229,7 +2266,7 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
                 )}
 
                 {/* Inline panel — koppla den här platsen till en "förälder"-plats */}
-                {settingParentFor===loc.key&&(
+                {!selectMode&&settingParentFor===loc.key&&(
                   <div style={{padding:"0 14px 14px",background:BG,borderTop:`1px solid ${BD}`}} onClick={e=>e.stopPropagation()}>
                     <div style={{fontSize:11,color:MU,margin:"10px 0 6px"}}>Var finns "{loc.display}" själv? (t.ex. vilken hylla en låda står på)</div>
                     <div style={{display:"flex",gap:8}}>
@@ -2242,7 +2279,7 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
                   </div>
                 )}
 
-                {isOpen&&(
+                {!selectMode&&isOpen&&(
                   <div style={{borderTop:`1px solid ${BD}`}}>
                     {locItems.map(item=>(
                       <div key={item.id} style={{borderBottom:`1px solid ${BD}`,background:WH}}>
@@ -2302,6 +2339,14 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
         {knownLocations.map(l=><option key={l} value={l}/>)}
       </datalist>
 
+      {selectMode&&selectedLocs.size>0&&(
+        <div style={{position:"fixed",bottom:0,left:0,right:0,background:WH,borderTop:`1px solid ${BD}`,padding:"12px 14px",boxShadow:"0 -4px 12px rgba(0,0,0,.06)",display:"flex",alignItems:"center",gap:10,zIndex:100}}>
+          <div style={{fontSize:13,fontWeight:600,color:TX}}>{selectedLocs.size} platser valda</div>
+          <div style={{flex:1}}/>
+          <Btn small onClick={goToQrPage}><Icon name="qrcode"/> Skriv ut QR</Btn>
+        </div>
+      )}
+
       {confirmDeleteLoc&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}} onClick={()=>setConfirmDeleteLoc(null)}>
           <div onClick={e=>e.stopPropagation()} style={{background:WH,borderRadius:14,padding:20,maxWidth:360,width:"100%"}}>
@@ -2321,12 +2366,86 @@ function LocationViewPage({ items, saveItems, lists, saveLists, pop, push, can, 
 }
 
 // ─── Delar utan plats ──────────────────────────────────────────────────────────
-function NoLocationPage({ items, saveItems, lists, pop, push, can, isAdmin, toast$ }) {
+// ─── QR-etiketter för FLERA platser på en gång ─────────────────────────────────
+function LocationQrLabelsPage({ pop, toast$, locations }) {
+  const [selected, setSelected] = useState(new Set((locations||[]).map(l=>l.key)));
+  const list = locations||[];
+
+  const toggle = (key) => setSelected(s => { const n=new Set(s); n.has(key)?n.delete(key):n.add(key); return n; });
+  const selectAll = () => setSelected(new Set(list.map(l=>l.key)));
+  const clearAll = () => setSelected(new Set());
+
+  const printSelected = () => {
+    const toPrint = list.filter(l=>selected.has(l.key));
+    if (toPrint.length===0) { toast$("Välj minst en plats","error"); return; }
+
+    const pages = toPrint.map(l => {
+      const qrData = `LAGERBOX:${l.display}`;
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(qrData)}`;
+      return `<div class="page">
+        <div class="name">${l.display}</div>
+        <div class="sub">${l.count} delar i lådan</div>
+        <img src="${qrUrl}"/>
+        <div class="hint">Skanna för att se allt i lådan</div>
+      </div>`;
+    }).join("");
+
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Låd-QR — ${toPrint.length} platser</title>
+    <style>
+      @page{size:A6;margin:0}
+      *{box-sizing:border-box}
+      body{font-family:'Segoe UI',Arial,sans-serif;margin:0;padding:0;color:#141820}
+      .page{width:105mm;height:148mm;padding:10mm;text-align:center;page-break-after:always;display:flex;flex-direction:column;align-items:center;justify-content:center}
+      .name{font-size:22px;font-weight:800;color:#1B3A6B;margin-bottom:6mm;word-break:break-word}
+      .sub{font-size:12px;color:#888;margin-bottom:6mm}
+      img{width:55mm;height:55mm}
+      .hint{font-size:11px;color:#888;margin-top:6mm}
+    </style></head><body>${pages}
+    <script>window.addEventListener('load',function(){setTimeout(function(){window.print();},400);});</script></body></html>`;
+    printHtml(html);
+  };
+
+  return (
+    <Page>
+      <TopBar title="QR-etiketter för platser" onBack={pop} subtitle={`${selected.size} av ${list.length} valda`}
+        right={<Btn small onClick={printSelected} disabled={selected.size===0}><Icon name="print"/> Skriv ut</Btn>}/>
+      <div style={{padding:"14px 14px 60px"}}>
+        <div style={{display:"flex",gap:8,marginBottom:14}}>
+          <Btn small variant="ghost" onClick={selectAll}>Välj alla</Btn>
+          <Btn small variant="ghost" onClick={clearAll}>Rensa</Btn>
+        </div>
+        {list.length===0&&<div style={{textAlign:"center",color:MU,padding:40}}>Inga platser valda — gå tillbaka och välj minst en</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {list.map(l=>{
+            const isSel = selected.has(l.key);
+            return (
+              <div key={l.key} onClick={()=>toggle(l.key)} style={{display:"flex",alignItems:"center",gap:10,background:WH,borderRadius:10,border:`1.5px solid ${isSel?BX:BD}`,padding:"12px 14px",cursor:"pointer"}}>
+                <div style={{width:20,height:20,borderRadius:5,border:`2px solid ${isSel?BX:BD}`,background:isSel?BX:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                  {isSel&&<Icon name="check" style={{color:WH,fontSize:11}}/>}
+                </div>
+                <i className="fa-solid fa-location-dot" style={{color:BX,fontSize:13,flexShrink:0}}/>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:14,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.display}</div>
+                  <div style={{fontSize:11,color:MU}}>{l.count} delar</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </Page>
+  );
+}
+
+function NoLocationPage({ items, saveItems, lists, pop, push, can, isAdmin, toast$, currentUser, moveToTrash }) {
   const [search, setSearch] = useState("");
   const [movingId, setMovingId] = useState(null);
   const [moveType, setMoveType] = useState("");
   const [moveLoc, setMoveLoc] = useState("");
   const [moveParent, setMoveParent] = useState("");
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const noLoc = items.filter(i => !i.location).filter(i => !search || i.name.toLowerCase().includes(search.toLowerCase()) || (i.stockNumber||"").includes(search));
 
@@ -2339,37 +2458,66 @@ function NoLocationPage({ items, saveItems, lists, pop, push, can, isAdmin, toas
     cancelMove();
   };
 
+  const toggleSel = (id) => setSelected(s => { const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; });
+  const selectAll = () => setSelected(new Set(noLoc.map(i=>i.id)));
+  const clearSel = () => setSelected(new Set());
+  const exitSelectMode = () => { setSelectMode(false); setSelected(new Set()); };
+  const applyDelete = async () => {
+    const toTrash = items.filter(i => selected.has(i.id));
+    const remaining = items.filter(i => !selected.has(i.id));
+    await saveItems(remaining);
+    moveToTrash?.(toTrash, currentUser?.username);
+    toast$(`${toTrash.length} delar flyttade till papperskorgen`,"success");
+    setConfirmDelete(false);
+    exitSelectMode();
+  };
+
   const locationTypeOptions = lists?.locationTypes || [];
   const knownLocations = [...new Set(items.map(i=>i.location).filter(Boolean))].sort((a,b)=>naturalCompare(a,b));
 
   return (
     <Page>
-      <TopBar title="Delar utan plats" subtitle={`${noLoc.length} delar saknar en tilldelad plats`} onBack={pop}/>
-      <div style={{padding:"14px 14px 40px"}}>
+      <TopBar title="Delar utan plats" subtitle={`${noLoc.length} delar saknar en tilldelad plats`} onBack={pop}
+        right={<button onClick={()=>selectMode?exitSelectMode():setSelectMode(true)} style={{background:"none",border:"none",color:selectMode?R:BX,fontWeight:700,fontSize:13,cursor:"pointer"}}>{selectMode?"Avbryt":"Välj"}</button>}/>
+      <div style={{padding:"14px 14px 60px"}}>
         <div style={{position:"relative",marginBottom:14}}>
           <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:13,color:MU,pointerEvents:"none"}}><Icon name="magnifying-glass"/></span>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Sök namn eller lagernummer…"
             style={{width:"100%",padding:"10px 10px 10px 30px",border:`1.5px solid ${BD}`,borderRadius:8,fontSize:13,boxSizing:"border-box",background:WH}}/>
         </div>
+        {selectMode&&(
+          <div style={{display:"flex",gap:8,marginBottom:14}}>
+            <Btn small variant="ghost" onClick={selectAll}>Välj alla ({noLoc.length})</Btn>
+            <Btn small variant="ghost" onClick={clearSel}>Rensa</Btn>
+          </div>
+        )}
         {noLoc.length===0&&<div style={{textAlign:"center",color:MU,padding:40}}><Icon name="circle-check" style={{fontSize:32,marginBottom:10,display:"block",color:GR}}/>Alla delar har en tilldelad plats</div>}
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {noLoc.map(item=>(
-            <div key={item.id} style={{background:WH,borderRadius:10,border:`1px solid ${AM}40`,overflow:"hidden"}}>
+          {noLoc.map(item=>{
+            const isSel = selected.has(item.id);
+            return (
+            <div key={item.id} style={{background:WH,borderRadius:10,border:`1px solid ${selectMode?(isSel?BX:BD):AM+"40"}`,overflow:"hidden"}}>
               <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px"}}>
-                <div onClick={()=>push("detail",{item})} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
-                  <span style={{background:BX,color:WH,borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:800,flexShrink:0}}>#{item.stockNumber}</span>
+                <div onClick={()=>selectMode?toggleSel(item.id):push("detail",{item})} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
+                  {selectMode?(
+                    <div style={{width:20,height:20,borderRadius:5,border:`2px solid ${isSel?BX:BD}`,background:isSel?BX:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                      {isSel&&<Icon name="check" style={{color:WH,fontSize:11}}/>}
+                    </div>
+                  ):(
+                    <span style={{background:BX,color:WH,borderRadius:4,padding:"1px 6px",fontSize:11,fontWeight:800,flexShrink:0}}>#{item.stockNumber}</span>
+                  )}
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:600,fontSize:13,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}{item.side?` — ${item.side}`:""}</div>
                     {item.warehouse&&<div style={{fontSize:10,color:MU}}>{item.warehouse}</div>}
                   </div>
                 </div>
-                {(isAdmin||can("canEdit"))&&(
+                {!selectMode&&(isAdmin||can("canEdit"))&&(
                   <Btn small variant={movingId===item.id?"blue":"ghost"} onClick={()=>movingId===item.id?cancelMove():startMove(item)}>
                     <Icon name="location-dot"/> Ge plats
                   </Btn>
                 )}
               </div>
-              {movingId===item.id&&(
+              {!selectMode&&movingId===item.id&&(
                 <div style={{padding:"0 14px 14px",background:BG}}>
                   <div style={{display:"flex",gap:8,marginBottom:8}}>
                     <select value={moveType} onChange={e=>setMoveType(e.target.value)} style={{flex:1,padding:"8px 10px",border:`1.5px solid ${BD}`,borderRadius:6,fontSize:12,background:WH}}>
@@ -2388,19 +2536,43 @@ function NoLocationPage({ items, saveItems, lists, pop, push, can, isAdmin, toas
                 </div>
               )}
             </div>
-          ))}
+          );})}
         </div>
       </div>
       <datalist id="known-locations-nl">
         {knownLocations.map(l=><option key={l} value={l}/>)}
       </datalist>
+
+      {selectMode&&selected.size>0&&(
+        <div style={{position:"fixed",bottom:0,left:0,right:0,background:WH,borderTop:`1px solid ${BD}`,padding:"12px 14px",boxShadow:"0 -4px 12px rgba(0,0,0,.06)",display:"flex",alignItems:"center",gap:10,zIndex:100}}>
+          <div style={{fontSize:13,fontWeight:600,color:TX}}>{selected.size} delar valda</div>
+          <div style={{flex:1}}/>
+          <Btn small variant="red" onClick={()=>setConfirmDelete(true)}><Icon name="trash"/> Ta bort</Btn>
+        </div>
+      )}
+
+      {confirmDelete&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}} onClick={()=>setConfirmDelete(false)}>
+          <div onClick={e=>e.stopPropagation()} style={{background:WH,borderRadius:14,padding:20,maxWidth:360,width:"100%"}}>
+            <div style={{fontWeight:700,fontSize:15,marginBottom:8}}>Ta bort {selected.size} delar?</div>
+            <div style={{fontSize:13,color:MU,marginBottom:16}}>Flyttas till papperskorgen — kan återställas därifrån i 30 dagar.</div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn full variant="ghost" onClick={()=>setConfirmDelete(false)}>Avbryt</Btn>
+              <Btn full variant="red" onClick={applyDelete}>Ta bort {selected.size}</Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </Page>
   );
 }
 
 // ─── Försvunna delar ───────────────────────────────────────────────────────────
-function MissingItemsPage({ items, saveItems, pop, push, can, isAdmin, toast$, logActivity, currentUser }) {
+function MissingItemsPage({ items, saveItems, pop, push, can, isAdmin, toast$, logActivity, currentUser, moveToTrash }) {
   const [search, setSearch] = useState("");
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const missing = items.filter(i => i.missing).filter(i => !search || i.name.toLowerCase().includes(search.toLowerCase()) || (i.stockNumber||"").includes(search));
 
   const markFound = async (item) => {
@@ -2409,22 +2581,51 @@ function MissingItemsPage({ items, saveItems, pop, push, can, isAdmin, toast$, l
     toast$(`${item.name} markerad som hittad`,"success");
   };
 
+  const toggleSel = (id) => setSelected(s => { const n=new Set(s); n.has(id)?n.delete(id):n.add(id); return n; });
+  const selectAll = () => setSelected(new Set(missing.map(i=>i.id)));
+  const clearSel = () => setSelected(new Set());
+  const exitSelectMode = () => { setSelectMode(false); setSelected(new Set()); };
+  const applyDelete = async () => {
+    const toTrash = items.filter(i => selected.has(i.id));
+    const remaining = items.filter(i => !selected.has(i.id));
+    await saveItems(remaining);
+    moveToTrash?.(toTrash, currentUser?.username);
+    toast$(`${toTrash.length} delar flyttade till papperskorgen`,"success");
+    setConfirmDelete(false);
+    exitSelectMode();
+  };
+
   return (
     <Page>
-      <TopBar title="Försvunna delar" subtitle={`${missing.length} delar markerade som borttappade`} onBack={pop}/>
-      <div style={{padding:"14px 14px 40px"}}>
+      <TopBar title="Försvunna delar" subtitle={`${missing.length} delar markerade som borttappade`} onBack={pop}
+        right={<button onClick={()=>selectMode?exitSelectMode():setSelectMode(true)} style={{background:"none",border:"none",color:selectMode?R:BX,fontWeight:700,fontSize:13,cursor:"pointer"}}>{selectMode?"Avbryt":"Välj"}</button>}/>
+      <div style={{padding:"14px 14px 60px"}}>
         <div style={{position:"relative",marginBottom:14}}>
           <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:13,color:MU,pointerEvents:"none"}}><Icon name="magnifying-glass"/></span>
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Sök namn eller lagernummer…"
             style={{width:"100%",padding:"10px 10px 10px 30px",border:`1.5px solid ${BD}`,borderRadius:8,fontSize:13,boxSizing:"border-box",background:WH}}/>
         </div>
+        {selectMode&&(
+          <div style={{display:"flex",gap:8,marginBottom:14}}>
+            <Btn small variant="ghost" onClick={selectAll}>Välj alla ({missing.length})</Btn>
+            <Btn small variant="ghost" onClick={clearSel}>Rensa</Btn>
+          </div>
+        )}
         {missing.length===0&&<div style={{textAlign:"center",color:MU,padding:40}}><Icon name="circle-check" style={{fontSize:32,marginBottom:10,display:"block",color:GR}}/>Inga delar markerade som borttappade</div>}
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
-          {missing.map(item=>(
-            <div key={item.id} style={{background:WH,borderRadius:10,border:`1px solid ${R}40`,padding:"12px 14px"}}>
+          {missing.map(item=>{
+            const isSel = selected.has(item.id);
+            return (
+            <div key={item.id} style={{background:WH,borderRadius:10,border:`1px solid ${selectMode?(isSel?BX:BD):R+"40"}`,padding:"12px 14px"}}>
               <div style={{display:"flex",alignItems:"center",gap:10}}>
-                <div onClick={()=>push("detail",{item})} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
-                  <Icon name="triangle-exclamation" style={{color:R,flexShrink:0}}/>
+                <div onClick={()=>selectMode?toggleSel(item.id):push("detail",{item})} style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0,cursor:"pointer"}}>
+                  {selectMode?(
+                    <div style={{width:20,height:20,borderRadius:5,border:`2px solid ${isSel?BX:BD}`,background:isSel?BX:"transparent",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                      {isSel&&<Icon name="check" style={{color:WH,fontSize:11}}/>}
+                    </div>
+                  ):(
+                    <Icon name="triangle-exclamation" style={{color:R,flexShrink:0}}/>
+                  )}
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontWeight:600,fontSize:13}}>{item.name}{item.side?` — ${item.side}`:""}</div>
                     <div style={{fontSize:11,color:MU,marginTop:2}}>
@@ -2435,14 +2636,35 @@ function MissingItemsPage({ items, saveItems, pop, push, can, isAdmin, toast$, l
                     {item.missingSince&&<div style={{fontSize:10,color:MU,marginTop:2}}>Markerad borttappad: {new Date(item.missingSince).toLocaleDateString("sv-SE")}</div>}
                   </div>
                 </div>
-                {(isAdmin||can("canEdit"))&&(
+                {!selectMode&&(isAdmin||can("canEdit"))&&(
                   <Btn small variant="ghost" onClick={()=>markFound(item)}><Icon name="check"/> Hittad</Btn>
                 )}
               </div>
             </div>
-          ))}
+          );})}
         </div>
       </div>
+
+      {selectMode&&selected.size>0&&(
+        <div style={{position:"fixed",bottom:0,left:0,right:0,background:WH,borderTop:`1px solid ${BD}`,padding:"12px 14px",boxShadow:"0 -4px 12px rgba(0,0,0,.06)",display:"flex",alignItems:"center",gap:10,zIndex:100}}>
+          <div style={{fontSize:13,fontWeight:600,color:TX}}>{selected.size} delar valda</div>
+          <div style={{flex:1}}/>
+          <Btn small variant="red" onClick={()=>setConfirmDelete(true)}><Icon name="trash"/> Ta bort</Btn>
+        </div>
+      )}
+
+      {confirmDelete&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.4)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}} onClick={()=>setConfirmDelete(false)}>
+          <div onClick={e=>e.stopPropagation()} style={{background:WH,borderRadius:14,padding:20,maxWidth:360,width:"100%"}}>
+            <div style={{fontWeight:700,fontSize:15,marginBottom:8}}>Ta bort {selected.size} delar?</div>
+            <div style={{fontSize:13,color:MU,marginBottom:16}}>Flyttas till papperskorgen — kan återställas därifrån i 30 dagar.</div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn full variant="ghost" onClick={()=>setConfirmDelete(false)}>Avbryt</Btn>
+              <Btn full variant="red" onClick={applyDelete}>Ta bort {selected.size}</Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </Page>
   );
 }
