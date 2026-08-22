@@ -1555,7 +1555,8 @@ function CheckoutPage({ cart, setCart, addToCart, clearCart, items, sales, saveI
       const saleEntriesWithCustomer = saleEntries.map(e => ({ ...e, customerId: finalCustomerId||null }));
       await saveSales([...saleEntriesWithCustomer, ...(sales||[])]);
       logActivity&&logActivity("sale", `Kassaköp: ${saleEntries.reduce((a,e)=>a+e.qty,0)} delar för ${finalTotal.toLocaleString("sv-SE")} kr (${buyer.trim()||"Okänd"})`, { user: currentUser?.username });
-      fetch("/admin/api/notify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({type:"large_sale",total:finalTotal,buyer:buyer.trim()||"Okänd",soldBy:currentUser?.username})}).catch(()=>{});
+      // Stor-köp-mejlet upptäcks nu automatiskt av servern själv när
+      // försäljningen sparas ovan — behöver inget separat anrop härifrån.
     } else {
       logActivity&&logActivity("sale", `Intern utlämning (ej registrerad): ${saleEntries.reduce((a,e)=>a+e.qty,0)} delar (${buyer.trim()||"Okänd"})`, { user: currentUser?.username });
     }
@@ -4896,7 +4897,8 @@ function LoginPage({ users, saveUsers, setSession, push, pop, replace, toast$, l
       if (!r.ok) {
         setError(r.error || "Fel inloggningsuppgifter");
         setLoading(false);
-        fetch("/admin/api/notify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({type:"failed_login",username:u})}).catch(()=>{});
+        // Mejlvarningen vid upprepade misslyckade försök sköts nu av
+        // /api/login självt (servern) — inget separat anrop behövs härifrån.
         return;
       }
 
@@ -7632,7 +7634,8 @@ function SellPage({ item, items, sales, saveItems, saveSales, currentUser, push,
       }
       await saveSales([{...saleEntry, customerId: finalCustomerId||null},...(sales||[])]);
       logActivity&&logActivity("sale", `Sålde ${qty} × ${item.name}${item.stockNumber?` (#${item.stockNumber})`:""} för ${total.toLocaleString("sv-SE")} kr`, { user: currentUser?.username, itemName:item.name, stockNumber:item.stockNumber });
-      fetch("/admin/api/notify",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({type:"large_sale",total,buyer:buyer?.trim()||presetBuyer||"Okänd",soldBy:currentUser?.username})}).catch(()=>{});
+      // Stor-köp-mejlet upptäcks nu automatiskt av servern själv när
+      // försäljningen sparas ovan — behöver inget separat anrop härifrån.
       toast$(`Sålde ${qty} × ${item.name} — ${total.toLocaleString("sv-SE")} kr`,"success");
     } else {
       logActivity&&logActivity("sale", `Intern utlämning (ej registrerad): ${qty} × ${item.name}${item.stockNumber?` (#${item.stockNumber})`:""}`, { user: currentUser?.username, itemName:item.name, stockNumber:item.stockNumber });
@@ -8498,7 +8501,7 @@ function KgkPage({ items, saveItems, isAdmin, can, pop, toast$ }) {
             <Inp label="Bas-URL" value={cfg.baseUrl} onChange={e=>set("baseUrl",e.target.value)} placeholder="https://api.kgk.se/fordonsdata/v1"/>
             <div style={{position:"relative"}}>
               <label style={{display:"block",fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:4}}>API-nyckel</label>
-              <input type={showKey?"text":"password"} value={cfg.apiKey} onChange={e=>set("apiKey",e.target.value)} placeholder="Nyckel från KGK"
+              <input type={showKey?"text":"password"} value={cfg.apiKey} onChange={e=>set("apiKey",e.target.value)} placeholder={cfg.apiKeyConfigured?"•••••••• (sparad — lämna tomt för att behålla)":"Nyckel från KGK"}
                 style={{width:"100%",border:`1.5px solid ${BD}`,borderRadius:6,padding:"9px 40px 9px 12px",fontSize:14,boxSizing:"border-box",fontFamily:"monospace"}}/>
               <button onClick={()=>setShowKey(v=>!v)} type="button" style={{position:"absolute",right:8,top:28,background:"none",border:"none",color:MU,cursor:"pointer",padding:6}}>
                 <i className={`fa-solid fa-${showKey?"eye-slash":"eye"}`}/>
@@ -8624,7 +8627,7 @@ function EmailNotifyPage({ isAdmin, can, pop, toast$ }) {
             <Inp label="Gmail-adress" type="email" value={cfg.fromEmail} onChange={e=>set("fromEmail",e.target.value)} placeholder="dittkonto@gmail.com"/>
             <div style={{position:"relative"}}>
               <label style={{display:"block",fontSize:11,fontWeight:700,color:MU,textTransform:"uppercase",letterSpacing:.7,marginBottom:4}}>App-lösenord</label>
-              <input type={showPw?"text":"password"} value={cfg.appPassword} onChange={e=>set("appPassword",e.target.value)} placeholder="16 tecken från Google"
+              <input type={showPw?"text":"password"} value={cfg.appPassword} onChange={e=>set("appPassword",e.target.value)} placeholder={cfg.appPasswordConfigured?"•••••••• (sparat — lämna tomt för att behålla)":"16 tecken från Google"}
                 style={{width:"100%",border:`1.5px solid ${BD}`,borderRadius:6,padding:"9px 40px 9px 12px",fontSize:14,boxSizing:"border-box",fontFamily:"monospace"}}/>
               <button onClick={()=>setShowPw(v=>!v)} type="button" style={{position:"absolute",right:8,top:28,background:"none",border:"none",color:MU,cursor:"pointer",padding:6}}>
                 <i className={`fa-solid fa-${showPw?"eye-slash":"eye"}`}/>
