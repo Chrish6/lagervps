@@ -396,6 +396,12 @@ function clientIp(req) {
 // och skrivs om automatiskt till det nya, säkrare formatet — ingen
 // tvingas byta lösenord för att detta ska fungera.
 const crypto = require("crypto");
+// Valfritt: sätts denna miljövariabel krävs den (i headern X-Setup-Token)
+// för att skapa det allra första admin-kontot på en helt ny, tom
+// installation. Sätts den inte alls fungerar bootstrap precis som innan
+// (öppet, ingen extra token krävs) — påverkar aldrig en redan igångsatt
+// installation, bara skydd för framtida NYA installationer om man vill.
+const SETUP_TOKEN = process.env.SETUP_TOKEN || null;
 
 function hashPasswordServer(plain) {
   const salt = crypto.randomBytes(16).toString("hex");
@@ -591,7 +597,7 @@ app.post("/api/change-own-password", async (req, res) => {
   try {
     const { oldPassword, newPassword } = req.body || {};
     if (!oldPassword || !newPassword) return res.status(400).json({ ok:false, error:"Ange både gammalt och nytt lösenord" });
-    if (newPassword.length < 4) return res.status(400).json({ ok:false, error:"Nytt lösenord måste vara minst 4 tecken" });
+    if (newPassword.length < 8) return res.status(400).json({ ok:false, error:"Nytt lösenord måste vara minst 8 tecken" });
     const usersRow = await dbGet("ow:users");
     const users = usersRow ? JSON.parse(usersRow.value) : [];
     const idx = users.findIndex(u => u.username === req.authUsername);
@@ -817,18 +823,38 @@ app.post("/api/restore", async (req, res) => {
 app.post("/api/:key", async (req, res) => {
   try {
     stats.requests++;
-    // SÄKERHET: bara admin får skriva över hela användar- eller rollistan.
-    // Utan detta kunde VILKEN inloggad användare som helst (även en vanlig
-    // lagerarbetare) posta ett eget, modifierat ow:users och t.ex. sätta
-    // sin egen roll till "admin" — klientens dolda knappar/behörigheter
-    // skyddar bara UI:t, aldrig det faktiska API:t.
-    if (req.params.key === "ow:users" || req.params.key === "ow:roles") {
+    // SÄKERHET: central lista över nycklar som ENDAST admin får skriva
+    // till. Tidigare skyddades bara ow:users/ow:roles specifikt — men
+    // t.ex. ow:emailconfig (Gmail-lösenord), ow:kgkconfig (API-nyckel),
+    // ow:backupcloud och ow:settings kunde fortfarande ändras av VILKEN
+    // inloggad användare som helst. Genom att samla dem i EN lista här
+    // glöms ingen känslig nyckel bort i framtiden heller — nya känsliga
+    // inställningar läggs bara till i listan, istället för att behöva
+    // komma ihåg att skydda varje enskilt fall separat.
+    const ADMIN_WRITE_KEYS = new Set([
+      "ow:users", "ow:roles", "ow:emailconfig", "ow:kgkconfig", "ow:backupcloud", "ow:settings",
+    ]);
+    if (ADMIN_WRITE_KEYS.has(req.params.key)) {
       // Undantag: bootstrap av en helt ny, tom installation (ingen
-      // användare finns alls än) — annars kan ingen någonsin skapa det
-      // allra första kontot. Skyddas ändå av huvudadmin-kontrollen nedan.
-      const existingRow = await dbGet("ow:users");
-      const existingUsers = existingRow ? JSON.parse(existingRow.value) : [];
-      if (existingUsers.length > 0) {
+      // användare finns alls än) — bara relevant för ow:users/ow:roles,
+      // annars kan ingen någonsin skapa det allra första kontot. De
+      // övriga nycklarna (emailconfig m.fl.) har inget sådant behov —
+      // de skrivs aldrig innan en admin redan finns och loggat in.
+      // Om SETUP_TOKEN är satt i miljön krävs den DESSUTOM under detta
+      // bootstrap-fönster (samma valfria mönster som HEALTHCHECK_TOKEN) —
+      // annars skulle vem som helst som hinner nå en helt ny, tom
+      // installation FÖRST kunna skapa sig själv som första admin.
+      // Helt valfritt: sätts inget SETUP_TOKEN alls fungerar bootstrap
+      // precis som innan (påverkar inte en redan igångsatt installation).
+      let allowBootstrap = false;
+      if (req.params.key === "ow:users" || req.params.key === "ow:roles") {
+        const existingRow = await dbGet("ow:users");
+        const existingUsers = existingRow ? JSON.parse(existingRow.value) : [];
+        const isEmpty = existingUsers.length === 0;
+        const setupOk = !SETUP_TOKEN || req.headers["x-setup-token"] === SETUP_TOKEN;
+        allowBootstrap = isEmpty && setupOk;
+      }
+      if (!allowBootstrap) {
         const ok = await requireAdmin(req, res);
         if (!ok) return;
       }
@@ -872,6 +898,15 @@ app.post("/api/:key", async (req, res) => {
         const existingRow = await dbGet("ow:users");
         const existing = existingRow ? JSON.parse(existingRow.value) : [];
         const byId = new Map(existing.map(u => [u.id, u]));
+        // SÄKERHET: minsta lösenordslängd gäller HÄR, oavsett om lösenordet
+        // sätts via "byt eget lösenord" eller av en admin som skapar/
+        // redigerar en annan användare — båda vägarna går genom denna
+        // gemensamma hashning, så en enda kontroll här täcker allt.
+        for (const u of incoming) {
+          if (u.newPlainPassword && u.newPlainPassword.length < 8) {
+            return res.status(400).json({ error: `Lösenordet för ${u.username||"okänd"} måste vara minst 8 tecken` });
+          }
+        }
         const merged = incoming.map(u => {
           const prev = byId.get(u.id);
           const { newPlainPassword, ...rest } = u;
@@ -942,12 +977,13 @@ app.post("/api/:key", async (req, res) => {
   }
 });
 
-app.delete("/api/:key", async (req, res) => {
-  try {
-    await dbDel(req.params.key);
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// SÄKERHET: den generiska DELETE /api/:key-endpointen är borttagen helt.
+// Den hade tidigare NOLL skydd — vilken inloggad användare som helst kunde
+// radera VILKEN databasnyckel som helst (ow:users, ow:sessions, ow:items,
+// allt). Klienten använde den aldrig till något (bekräftat genom att söka
+// igenom hela koden), så den togs bort helt istället för att bara läggas
+// bakom en behörighetskontroll — inget legitimt att skydda, bara en
+// onödig attackyta som stängs helt.
 
 // ── Item-level operations (undviker att skriva över andras ändringar) ─────────
 // Uppdatera/lägg till EN artikel
@@ -1165,7 +1201,15 @@ function sendImage(req, res, idx) {
 const HEALTHCHECK_TOKEN = process.env.HEALTHCHECK_TOKEN || null;
 app.get("/admin/api/healthcheck", async (req, res) => {
   try {
-    if (HEALTHCHECK_TOKEN && req.query.token !== HEALTHCHECK_TOKEN) {
+    // SÄKERHET: "fail closed" — om HEALTHCHECK_TOKEN inte är satt i miljön
+    // (t.ex. glömdes bort vid uppsättning) visas ENDAST ett minimalt
+    // ok:true/false, ALDRIG detaljerad affärsdata (antal delar, kunder,
+    // försäljningar, serverns upptid m.m.) publikt på internet. Tidigare
+    // exponerades allt det där rakt av så fort token-variabeln saknades —
+    // nu krävs token uttryckligen för att få den fulla, detaljerade
+    // rapporten, annars bara ett kort "fungerar/fungerar inte".
+    const authorized = HEALTHCHECK_TOKEN && req.query.token === HEALTHCHECK_TOKEN;
+    if (HEALTHCHECK_TOKEN && !authorized) {
       return res.status(401).json({ ok:false, error:"Ogiltig eller saknad token." });
     }
     const BACKUP_DIR = getBackupDir();
@@ -1192,6 +1236,11 @@ app.get("/admin/api/healthcheck", async (req, res) => {
     const dbOk = itemsRow !== null && usersRow !== null;
     const uptimeSeconds = Math.floor(process.uptime());
     const ok = backupOk && dbOk;
+
+    if (!authorized) {
+      // Ingen token konfigurerad alls — minimal, ofarlig information bara.
+      return res.json({ ok });
+    }
     res.json({
       ok,
       checkedAt: new Date().toISOString(),
