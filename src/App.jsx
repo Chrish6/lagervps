@@ -9055,7 +9055,7 @@ function ProfilePage({ currentUser, users, saveUsers, pop, toast$, theme, setThe
 
   const savePassword = async () => {
     if (!oldPw.trim()) { toast$("Fyll i ditt nuvarande lösenord","error"); return; }
-    if (!newPw.trim() || newPw.length < 4) { toast$("Det nya lösenordet måste vara minst 4 tecken","error"); return; }
+    if (!newPw.trim() || newPw.length < 8) { toast$("Det nya lösenordet måste vara minst 8 tecken","error"); return; }
     if (newPw !== confirmPw) { toast$("De nya lösenorden matchar inte","error"); return; }
     setSaving(true);
     try {
@@ -9211,7 +9211,13 @@ function EditUserPage({ user, users, roles, saveUsers, pop, toast$, lists, curre
     // Lösenordet hashas alltid på SERVERN, aldrig i webbläsaren — se
     // servens hantering av fältet newPlainPassword. Lämnas fältet tomt vid
     // redigering av en befintlig användare behålls det gamla lösenordet
-    // automatiskt (servern bevarar det om inget nytt anges).
+    // automatiskt (servern bevarar det om inget nytt anges). Kontrollen
+    // här är bara för snabb återkoppling — servern kontrollerar samma sak
+    // på riktigt och är den faktiska säkerhetsgränsen.
+    if (finalF.password?.trim() && finalF.password.trim().length < 8) {
+      toast$("Lösenordet måste vara minst 8 tecken","error");
+      return;
+    }
     if (finalF.id) {
       const { password, ...rest } = finalF;
       const updated = { ...rest, ...(password.trim() ? { newPlainPassword: password.trim() } : {}) };
