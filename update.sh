@@ -28,6 +28,12 @@ echo "Hämtar från GitHub..."
 git pull
 
 echo ""
+echo "Ser till att data/-mappen ägs av rätt användare (containern kör numera"
+echo "som en icke-root-användare av säkerhetsskäl, UID 1000)..."
+mkdir -p data
+chown -R 1000:1000 data 2>/dev/null || echo "  (kunde inte ändra ägare — kör som root/sudo om detta är första gången)"
+
+echo ""
 echo "Bygger om och startar om containern..."
 # --build bygger om imagen med den nya koden. Datan i ./data (databas,
 # backuper) rörs inte — den ligger utanför containern, se docker-compose.yml.

@@ -1,6 +1,6 @@
 const express = require("express");
+const helmet  = require("helmet");
 const sqlite3 = require("sqlite3").verbose();
-const cors    = require("cors");
 const path    = require("path");
 const os      = require("os");
 const fs      = require("fs");
@@ -38,6 +38,16 @@ process.on("unhandledRejection", (err) => {
 // varianten server.cjs har kvar mDNS-blocket.)
 
 const app  = express();
+// SÄKERHET: talar om för Express att den KÖR bakom en reverse proxy
+// (Traefik, på samma maskin — containern är bunden till 127.0.0.1:3000,
+// bara nåbar lokalt). "loopback" betyder att Express bara litar på
+// X-Forwarded-For-headern när anropet kommer från localhost (dvs. FRÅN
+// Traefik självt) — inte från en extern klient som skulle kunna sätta
+// headern själv för att förfalska sin IP och kringgå IP-baserad
+// utspärrning vid t.ex. upprepade felaktiga inloggningsförsök. Med detta
+// beräknar Express req.ip säkert själv, istället för att koden manuellt
+// (och otryggt) läser headern rakt av.
+app.set("trust proxy", "loopback");
 // Konfigurerbar via miljövariabel (används av Docker-uppsättningen för att
 // peka på en monterad, beständig mapp) — annars exakt samma beteende som
 // innan (en lager.db bredvid server.cjs), inget ändras för Windows/vanlig
@@ -97,6 +107,27 @@ function dbDel(key) {
   });
 }
 
+// ── Serverstyrd audit-logg ───────────────────────────────────────────────────
+// Separat från den vanliga aktivitetsloggen (ow:activitylog), som klienten
+// själv väljer VAD som ska rapporteras dit — en manipulerad/skadlig klient
+// skulle alltså i teorin kunna hoppa över att rapportera något dit. Den
+// här loggen skrivs ISTÄLLET direkt från servern själv, vid källan, för de
+// mest känsliga händelserna (inloggningar, roll-/behörighetsändringar,
+// återställningar, konfigurationsändringar) — omöjlig att kringgå från
+// klientsidan eftersom den aldrig är klientens beslut att göra.
+async function auditLog(event, username, details = {}) {
+  try {
+    const row = await dbGet("ow:serverauditlog");
+    const log = row ? JSON.parse(row.value) : [];
+    log.unshift({ event, username: username || "okänd", details, ts: Date.now() });
+    // Behåll bara de senaste 2000 posterna — annars växer den obegränsat
+    if (log.length > 2000) log.length = 2000;
+    await dbSet("ow:serverauditlog", JSON.stringify(log));
+  } catch (e) {
+    console.error("[audit] Kunde inte skriva logg:", e.message);
+  }
+}
+
 // ── E-postnotiser (Gmail via app-lösenord) ────────────────────────────────────
 const nodemailer = require("nodemailer");
 
@@ -141,16 +172,49 @@ function mapKgkResponse(raw) {
   };
 }
 
-app.use(cors());
-app.use(express.json({ limit: "500mb" }));
-app.use(express.urlencoded({ limit: "500mb", extended: true }));
+// SÄKERHET: grundläggande säkerhetsheaders (CSP, HSTS, X-Content-Type-
+// Options, klickjacknings-skydd m.m.) — saknades tidigare helt.
+// Content-Security-Policy nedan är byggd utifrån de EXTERNA resurser
+// appen faktiskt använder (kollat igenom hela koden för att hitta dem,
+// inte gissat) — QR-koder, Font Awesome, Google Fonts, ZXing (skanning)
+// och xlsx-export. 'unsafe-inline' krävs tyvärr för style-src eftersom
+// hela appens gränssnitt bygger på Reacts style={{}}-attribut (renderas
+// som inline style="..." i DOM:en) — att ta bort det kräver en stor,
+// separat omskrivning till CSS-klasser. script-src har DÄREMOT ingen
+// 'unsafe-inline' alls, vilket är den viktigaste delen att hålla strikt
+// (huvudförsvaret mot XSS) — det inline-skriptet som fanns i index.html
+// flyttades till en riktig modulfil just för att slippa behöva det här.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "https://unpkg.com", "https://cdnjs.cloudflare.com"],
+      styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdnjs.cloudflare.com"],
+      fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com", "data:"],
+      imgSrc: ["'self'", "data:", "blob:", "https://api.qrserver.com", "https://barcodeapi.org"],
+      connectSrc: ["'self'"],
+      mediaSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
+  // Kameraåtkomst (QR/streckkodsskanning) kräver HTTPS, men det kravet sätts
+  // redan av webbläsaren självt oavsett — påverkas inte av detta.
+  crossOriginEmbedderPolicy: false, // skulle annars blockera de externa QR/bild-anropen ovan
+}));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // ── Skydd för admin-panelen (den separata sidan på /admin) ─────────────────
 // Tre nivåer av skydd under /admin/api/*, inte bara två:
-//   1. HELT ÖPPET — /admin/api/healthcheck (externa övervakningsverktyg,
-//      skyddas separat av HEALTHCHECK_TOKEN) och /admin/api/notify (måste
-//      kunna nås även INNAN någon loggat in — t.ex. ett mejl vid en
-//      misslyckad inloggning, då finns ingen sessionstoken alls än).
+//   1. HELT ÖPPET — bara /admin/api/healthcheck (externa övervakningsverktyg,
+//      skyddas separat av HEALTHCHECK_TOKEN). Notiser om misslyckade
+//      inloggningar/stora köp ligger INTE här längre — de sker numera
+//      direkt inuti /api/login respektive den vanliga ow:sales-sparningen,
+//      som redan kräver (eller själva ÄR) autentisering. En helt öppen
+//      notis-endpoint skulle annars låta vem som helst trigga falska mejl.
 //   2. KRÄVER INLOGGNING (vilken roll som helst) — saker som triggas av
 //      vanliga, inloggade användares normala handlingar: en notis vid
 //      försäljning, en KGK-slagning, ett testmejl. De ska inte kräva
@@ -158,7 +222,7 @@ app.use(express.urlencoded({ limit: "500mb", extended: true }));
 //   3. KRÄVER ADMINROLL — själva adminpanelens instrumentpanel (status,
 //      enheter, omstart, backup-nu) — det här är den känsliga delen.
 const ADMIN_PANEL_PASSWORD = process.env.ADMIN_PANEL_PASSWORD || null;
-const ADMIN_FULLY_PUBLIC = new Set(["/admin/api/healthcheck", "/admin/api/notify"]);
+const ADMIN_FULLY_PUBLIC = new Set(["/admin/api/healthcheck"]);
 const ADMIN_LOGIN_ONLY = new Set([
   "/admin/api/event",
   "/admin/api/notify-warehouse-reservation",
@@ -166,7 +230,6 @@ const ADMIN_LOGIN_ONLY = new Set([
   "/admin/api/kgk/lookup",
   "/admin/api/kgk/notify-not-found",
   "/admin/api/email-test",
-  "/admin/api/backup-cloud/test",
 ]);
 app.use(async (req, res, next) => {
   if (!req.path.startsWith("/admin")) return next();
@@ -307,8 +370,11 @@ const liveFeed = []; // { type, description, user, ip, ts }
 const MAX_FEED = 60;
 
 function clientIp(req) {
-  let ip = (req.headers["x-forwarded-for"] || req.socket.remoteAddress || "").toString();
-  if (ip.includes(",")) ip = ip.split(",")[0].trim();
+  // req.ip beräknas av Express själv utifrån "trust proxy"-inställningen
+  // ovan — säkert mot förfalskade X-Forwarded-For-headrar från en extern
+  // klient, till skillnad från att läsa headern direkt (som den gjorde
+  // tidigare här).
+  let ip = (req.ip || req.socket.remoteAddress || "").toString();
   return ip.replace(/^::ffff:/, "").replace(/^::1$/, "127.0.0.1");
 }
 
@@ -362,20 +428,55 @@ async function getSessions() {
 }
 async function saveSessions(sessions) { await dbSet("ow:sessions", JSON.stringify(sessions)); }
 
+// SÄKERHET: sparar en HASH av token i databasen, aldrig den riktiga,
+// användbara token själv. Om databasen någonsin skulle läcka (t.ex. via
+// en exponerad backup-fil) skulle en angripare annars ha de exakta,
+// direkt användbara inloggningstokens för alla aktiva sessioner — kunde
+// omedelbart utge sig för att vara vem som helst utan att knäcka något
+// alls. Med hashning är det värdelöst utan den ORIGINALA token, som bara
+// någonsin skickas till den riktiga klienten vid inloggning. En vanlig,
+// snabb hash (inte scrypt som för lösenord) är rätt val här — token är
+// redan 32 slumpmässiga byte med hög entropi, inte en människovald,
+// gissningsbar hemlighet som lösenord är.
+function hashToken(token) {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
 const SESSION_DAYS = 30;
 async function createSession(username) {
   const token = crypto.randomBytes(32).toString("hex");
   const sessions = await getSessions();
-  sessions[token] = { username, expires: Date.now() + SESSION_DAYS * 864e5 };
+  sessions[hashToken(token)] = { username, expires: Date.now() + SESSION_DAYS * 864e5 };
   await saveSessions(sessions);
   return token;
 }
 async function getSessionUser(token) {
   if (!token) return null;
   const sessions = await getSessions();
-  const s = sessions[token];
+  const s = sessions[hashToken(token)];
   if (!s || s.expires < Date.now()) return null;
   return s.username;
+}
+
+// Kräver att den inloggade användaren (req.authUsername, satt av
+// autentiseringsmellanlagret) har adminroll. Skickar 403 och returnerar
+// false om inte — annars returnerar true och anroparen fortsätter. Bygger
+// alltid på SERVERNS egen lagrade användardata, aldrig något klienten
+// skickar med i requesten (som skulle kunna förfalskas).
+async function requireAdmin(req, res) {
+  try {
+    const usersRow = await dbGet("ow:users");
+    const users = usersRow ? JSON.parse(usersRow.value) : [];
+    const me = users.find(u => u.username === req.authUsername);
+    if (!me || me.role !== "admin") {
+      res.status(403).json({ ok:false, error:"Kräver adminbehörighet" });
+      return false;
+    }
+    return true;
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+    return false;
+  }
 }
 
 // Misslyckade inloggningsförsök — blockerar efter för många försök
@@ -407,6 +508,21 @@ app.post("/api/login", async (req, res) => {
     const valid = user && verifyPasswordServer(password, user.password);
     if (!valid) {
       recordFailedAttempt(key);
+      // Mejlvarning vid upprepade misslyckade försök — ligger HÄR (server-
+      // side, redan inloggnings-endpointen) istället för att triggas av ett
+      // separat, publikt API-anrop från klienten. En publik notis-endpoint
+      // skulle annars låta VEM SOM HELST på internet trigga falska
+      // varningsmejl till admin utan att ens försöka logga in på riktigt.
+      const notifKey = username.toLowerCase() + "|" + clientIp(req);
+      const now = Date.now();
+      failedLogins[notifKey] = (failedLogins[notifKey] || []).filter(t => now - t < 15 * 60 * 1000);
+      failedLogins[notifKey].push(now);
+      if (failedLogins[notifKey].length >= 3) {
+        sendNotification("failedLogin", `Flera misslyckade inloggningsförsök — ${username}`,
+          `<p>Minst 3 misslyckade inloggningsförsök på användarnamnet <strong>${username}</strong> från IP ${clientIp(req)} under de senaste 15 minuterna.</p>`
+        ).catch(()=>{});
+        failedLogins[notifKey] = [];
+      }
       // Samma generiska felmeddelande oavsett om användarnamnet finns eller
       // ej — avslöjar inte vilka konton som existerar.
       return res.status(401).json({ ok:false, error:"Fel användarnamn eller lösenord" });
@@ -417,6 +533,7 @@ app.post("/api/login", async (req, res) => {
       await dbSet("ow:users", JSON.stringify(users));
     }
     const token = await createSession(user.username);
+    auditLog("login", user.username, { ip: clientIp(req) });
     const { password: _pw, ...safeUser } = user;
     res.json({ ok:true, token, user: safeUser });
   } catch (e) {
@@ -428,7 +545,7 @@ app.post("/api/logout", async (req, res) => {
   try {
     const token = (req.headers.authorization || "").replace("Bearer ", "");
     const sessions = await getSessions();
-    delete sessions[token];
+    delete sessions[hashToken(token)];
     await saveSessions(sessions);
     res.json({ ok:true });
   } catch (e) { res.status(500).json({ ok:false, error: e.message }); }
@@ -510,6 +627,7 @@ app.post("/api/factory-reset", async (req, res) => {
     await dbSet("ow:customers", "[]");
     await dbSet("ow:activitylog", "[]");
     console.log(`[reset] Fabriksåterställning utförd av ${req.authUsername}`);
+    auditLog("factory_reset", req.authUsername);
     res.json({ ok:true });
   } catch (e) {
     res.status(500).json({ ok:false, error: e.message });
@@ -571,6 +689,26 @@ app.get("/api/:key", async (req, res) => {
         return res.json({ ...r, value: JSON.stringify(users) });
       } catch {}
     }
+    // SÄKERHET: konfigurationsnycklar som innehåller riktiga hemligheter
+    // (Gmail-app-lösenord, KGK-API-nyckel) ska ALDRIG kunna läsas ut i
+    // klartext via det här generiska API:t, bara för att man råkar vara
+    // inloggad. Maskerar de specifika känsliga fälten, men behåller
+    // resten (t.ex. om det är påslaget, vilken adress) så gränssnittet
+    // fortfarande kan visa "konfigurerat: ja/nej" korrekt.
+    const SECRET_FIELDS = {
+      "ow:emailconfig": ["appPassword"],
+      "ow:kgkconfig": ["apiKey"],
+    };
+    if (SECRET_FIELDS[req.params.key] && r && r.value) {
+      try {
+        const cfg = JSON.parse(r.value);
+        const masked = { ...cfg };
+        for (const field of SECRET_FIELDS[req.params.key]) {
+          if (masked[field]) { masked[`${field}Configured`] = true; delete masked[field]; }
+        }
+        return res.json({ ...r, value: JSON.stringify(masked) });
+      } catch {}
+    }
     res.json(r);
   } catch (e) { stats.errors++; res.status(500).json({ error: e.message }); }
 });
@@ -578,6 +716,11 @@ app.get("/api/:key", async (req, res) => {
 app.post("/api/restore", async (req, res) => {
   try {
     stats.requests++;
+    // SÄKERHET: återställning är en av de mest kraftfulla operationerna som
+    // finns (kan skriva över hela lagret, alla användare, inställningar) —
+    // ska bara kunna köras av admin, inte av en vanlig inloggad användare.
+    const ok = await requireAdmin(req, res);
+    if (!ok) return;
     if (!req.body || typeof req.body !== "object") {
       console.error("[FEL] restore: body tom eller ogiltig, typeof =", typeof req.body);
       return res.status(400).json({ error: "Ingen data mottogs (body tom)" });
@@ -596,11 +739,22 @@ app.post("/api/restore", async (req, res) => {
     // Dela upp items i lätt lista + bilder
     const lightItems = [];
     const imageRows = [];
+    let skippedInvalidImages = 0;
     for (const it of items) {
-      const imgs = it.images || [];
+      // SÄKERHET: samma bildvalidering som vid vanlig uppladdning — en
+      // backup-fil skulle annars kunna vara ett sätt att smyga in en
+      // ogiltig "bild" förbi den vanliga kontrollen. Ogiltiga bilder
+      // hoppas bara över (delen sparas ändå), avbryter inte hela
+      // återställningen för en enda dålig bild.
+      const rawImgs = it.images || [];
+      const imgs = rawImgs.filter(isValidImageDataUrl);
+      skippedInvalidImages += rawImgs.length - imgs.length;
       const light = { ...it, images: [], hasImages: imgs.length };
       lightItems.push(light);
       if (imgs.length > 0) imageRows.push([it.id, JSON.stringify(imgs)]);
+    }
+    if (skippedInvalidImages > 0) {
+      console.warn(`[restore] Hoppade över ${skippedInvalidImages} ogiltiga bilder`);
     }
 
     // Hämta befintlig lista (för append), eller börja om (för first batch)
@@ -651,6 +805,7 @@ app.post("/api/restore", async (req, res) => {
       });
     });
 
+    if (first) auditLog("restore", req.authUsername, { itemCount: combined.length });
     res.json({ ok: true, count: combined.length, items: combined });
   } catch (e) {
     stats.errors++;
@@ -662,8 +817,42 @@ app.post("/api/restore", async (req, res) => {
 app.post("/api/:key", async (req, res) => {
   try {
     stats.requests++;
+    // SÄKERHET: bara admin får skriva över hela användar- eller rollistan.
+    // Utan detta kunde VILKEN inloggad användare som helst (även en vanlig
+    // lagerarbetare) posta ett eget, modifierat ow:users och t.ex. sätta
+    // sin egen roll till "admin" — klientens dolda knappar/behörigheter
+    // skyddar bara UI:t, aldrig det faktiska API:t.
+    if (req.params.key === "ow:users" || req.params.key === "ow:roles") {
+      // Undantag: bootstrap av en helt ny, tom installation (ingen
+      // användare finns alls än) — annars kan ingen någonsin skapa det
+      // allra första kontot. Skyddas ändå av huvudadmin-kontrollen nedan.
+      const existingRow = await dbGet("ow:users");
+      const existingUsers = existingRow ? JSON.parse(existingRow.value) : [];
+      if (existingUsers.length > 0) {
+        const ok = await requireAdmin(req, res);
+        if (!ok) return;
+      }
+    }
     if (req.body.value === undefined) {
       return res.status(400).json({ error: "value saknas i body" });
+    }
+    // SKYDD: samma princip som för lösenord — klienten kan ha fått tillbaka
+    // en MASKERAD version (se GET ovan, ...Configured:true istället för det
+    // riktiga värdet). Sparar man då formuläret utan att ha skrivit in en NY
+    // hemlighet ska den GAMLA, riktiga hemligheten bevaras — annars raderas
+    // t.ex. Gmail-lösenordet bara för att man öppnade och stängde sidan.
+    const SECRET_FIELDS = { "ow:emailconfig": ["appPassword"], "ow:kgkconfig": ["apiKey"] };
+    if (SECRET_FIELDS[req.params.key]) {
+      try {
+        const incoming = JSON.parse(req.body.value);
+        const existingRow = await dbGet(req.params.key);
+        const existing = existingRow ? JSON.parse(existingRow.value) : {};
+        for (const field of SECRET_FIELDS[req.params.key]) {
+          if (!incoming[field] && existing[field]) incoming[field] = existing[field];
+        }
+        req.body.value = JSON.stringify(incoming);
+        auditLog("config_change", req.authUsername, { key: req.params.key });
+      } catch {}
     }
     // SKYDD: vägra skriva över ow:items med tom lista om det redan finns data
     if (req.params.key === "ow:items" && req.body.value === "[]") {
@@ -703,10 +892,46 @@ app.post("/api/:key", async (req, res) => {
         if (hadUsersBefore && huvudadminCount === 0) {
           return res.status(400).json({ error: "Går inte — måste finnas minst en huvudadmin (admin utan tilldelat hemmalager)." });
         }
+        // Audit-logg — upptäcker och loggar just ROLLÄNDRINGAR specifikt
+        // (jämför varje användares nya roll mot den de hade innan), inte
+        // bara att "något" i listan sparades. Det här är den känsligaste
+        // typen av ändring som finns i hela systemet.
+        for (const u of merged) {
+          const prev = byId.get(u.id);
+          if (prev && prev.role !== u.role) {
+            auditLog("role_change", req.authUsername, { targetUser: u.username, from: prev.role, to: u.role });
+          }
+        }
         req.body.value = JSON.stringify(merged);
       } catch (e) {
         return res.status(400).json({ error: "Ogiltig användardata: " + e.message });
       }
+    }
+    // Stor-köp-mejl — upptäcks HÄR (server-side, redan inloggningskrävande),
+    // genom att jämföra de nya försäljningarna mot de som redan fanns sen
+    // innan. Ligger INTE bakom ett separat, publikt API-anrop längre — det
+    // skulle annars låta VEM SOM HELST på internet trigga falska
+    // "stort köp"-mejl till admin utan att någon försäljning alls skett.
+    if (req.params.key === "ow:sales") {
+      try {
+        const incoming = JSON.parse(req.body.value);
+        const existingRow = await dbGet("ow:sales");
+        const existing = existingRow ? JSON.parse(existingRow.value) : [];
+        const existingIds = new Set(existing.map(s => s.id));
+        const newSales = incoming.filter(s => s.id && !existingIds.has(s.id));
+        if (newSales.length) {
+          const cfg = await getEmailConfig();
+          const threshold = cfg?.largePurchaseThreshold ?? 10000;
+          for (const sale of newSales) {
+            if ((sale.total || 0) >= threshold) {
+              sendNotification("largePurchase", `Stort köp genomfört — ${Number(sale.total).toLocaleString("sv-SE")} kr`,
+                `<p>Ett köp på <strong>${Number(sale.total).toLocaleString("sv-SE")} kr</strong> genomfördes.</p>
+                 <p>Kund: ${sale.buyer || "Okänd"}<br>Säljare: ${sale.soldBy || req.authUsername || "Okänd"}</p>`
+              ).catch(()=>{});
+            }
+          }
+        }
+      } catch {}
     }
     await dbSet(req.params.key, req.body.value);
     res.json({ ok: true });
@@ -840,6 +1065,35 @@ app.post("/api/lock/status", (req, res) => {
 });
 
 // ── Bilder — hämta bilder för EN artikel ──────────────────────────────────────
+// SÄKERHET: kontrollerar att en bild-dataURL faktiskt ÄR den bildtyp den
+// påstår sig vara — läser de riktiga "magiska byten" i början av filen,
+// inte bara den påstådda MIME-typen i själva dataURL-strängen (som går
+// att förfalska helt fritt, eftersom bilder skickas som data: URLs direkt
+// i JSON, inte som riktiga filuppladdningar). Utan detta skulle någon
+// kunna spara t.ex. "data:text/html;base64,<skadlig HTML/JS>" som en
+// "bild", och om den sidan sen öppnas direkt (t.ex. /api/img/ID i en ny
+// flik) skulle webbläsaren visa/köra den som HTML istället för en bild.
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB per bild — gott om marginal, se compressImage i klienten
+function isValidImageDataUrl(dataUrl) {
+  if (typeof dataUrl !== "string") return false;
+  const m = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+  if (!m) return false;
+  const declaredType = m[1].toLowerCase();
+  if (!["image/jpeg", "image/png", "image/webp"].includes(declaredType)) return false;
+  let buf;
+  try { buf = Buffer.from(m[2], "base64"); } catch { return false; }
+  if (buf.length === 0 || buf.length > MAX_IMAGE_BYTES) return false;
+  // Riktiga magiska byte-signaturer — går inte att förfalska bara genom
+  // att ändra MIME-typ-texten i dataURL:en, byten måste faktiskt stämma.
+  const isJpeg = buf[0]===0xFF && buf[1]===0xD8 && buf[2]===0xFF;
+  const isPng  = buf[0]===0x89 && buf[1]===0x50 && buf[2]===0x4E && buf[3]===0x47;
+  const isWebp = buf.length>12 && buf.toString("ascii",0,4)==="RIFF" && buf.toString("ascii",8,12)==="WEBP";
+  if (declaredType==="image/jpeg" && !isJpeg) return false;
+  if (declaredType==="image/png" && !isPng) return false;
+  if (declaredType==="image/webp" && !isWebp) return false;
+  return true;
+}
+
 app.get("/api/images/:id", (req, res) => {
   db.get("SELECT data FROM images WHERE item_id=?", [req.params.id], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -850,6 +1104,13 @@ app.get("/api/images/:id", (req, res) => {
 // Spara bilder för EN artikel
 app.post("/api/images/:id", (req, res) => {
   const imgs = req.body.images || [];
+  // SÄKERHET: varje bild valideras — riktig JPEG/PNG/WebP, rimlig storlek.
+  // Sparar ALDRIG in något som inte klarar kontrollen, oavsett vad
+  // klienten skickar (bilder kan i teorin skickas direkt till API:t,
+  // förbi klientens egen komprimering/kontroll).
+  if (imgs.length > 0 && !imgs.every(isValidImageDataUrl)) {
+    return res.status(400).json({ error: "En eller flera bilder är ogiltiga (måste vara riktig JPEG/PNG/WebP, max 8MB per bild)." });
+  }
   if (imgs.length === 0) {
     db.run("DELETE FROM images WHERE item_id=?", [req.params.id], () => res.json({ ok: true }));
   } else {
@@ -879,6 +1140,17 @@ function sendImage(req, res, idx) {
     if (!dataUrl || typeof dataUrl !== "string") return res.status(404).end();
     const m = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
     if (!m) return res.status(404).end();
+    // SÄKERHET: kontrollerar att den DEKLARERADE typen faktiskt är en bild
+    // innan den sätts som Content-Type — annars skulle en förfalskad typ
+    // (t.ex. "text/html") kunna få webbläsaren att köra innehållet som
+    // HTML/JS istället för att visa det som en bild. Görs medvetet lite
+    // enklare här än vid uppladdning (bara typ-kontroll, inte fullständig
+    // byte-signaturkontroll) — det viktiga är att stänga just den risken
+    // utan att riskera att blockera befintliga, redan sparade bilder som
+    // laddades upp innan den striktare kontrollen fanns.
+    if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(m[1].toLowerCase())) {
+      return res.status(404).end();
+    }
     const buf = Buffer.from(m[2], "base64");
     res.set("Content-Type", m[1]);
     res.set("Cache-Control", "public, max-age=31536000, immutable");
@@ -1001,6 +1273,19 @@ app.get("/admin/api/devices", (req, res) => {
   res.json({ devices: list, feed: liveFeed.slice(0, MAX_FEED) });
 });
 
+// Visar den serverstyrda audit-loggen (inloggningar, rolländringar,
+// återställningar, konfigurationsändringar) — kräver adminroll precis
+// som resten av /admin/api/* automatiskt gör (se mellanlagret ovan).
+app.get("/admin/api/audit-log", async (req, res) => {
+  try {
+    const row = await dbGet("ow:serverauditlog");
+    const log = row ? JSON.parse(row.value) : [];
+    res.json({ ok:true, log: log.slice(0, 500) });
+  } catch (e) {
+    res.status(500).json({ ok:false, error: e.message });
+  }
+});
+
 // Frontend rapporterar en händelse (köp, ändring m.m.) till live-flödet
 app.post("/admin/api/event", (req, res) => {
   const { type, description, user } = req.body || {};
@@ -1011,36 +1296,17 @@ app.post("/admin/api/event", (req, res) => {
 });
 
 // ── E-postnotiser: händelser som klienten inte kan avgöra själv ska mejlas ──
-// (stora köp, misslyckade inloggningar). Servern avgör tröskelvärden och skickar.
+// (stora köp, misslyckade inloggningar). Servern avgör tröskelvärden och
+// skickar. OBS: detta gjordes TIDIGARE via en separat, publik endpoint
+// (/admin/api/notify) som klienten anropade efter en lyckad/misslyckad
+// åtgärd — men det innebar att VEM SOM HELST på internet, utan att ens
+// logga in, kunde posta dit direkt och trigga falska varningsmejl om
+// "stora köp" eller "misslyckade inloggningar" som aldrig hänt. Logiken
+// bor nu istället DIREKT i /api/login (misslyckade försök) och i den
+// generiska ow:sales-skrivningen ovan (stora köp) — båda kräver redan
+// autentisering (eller är i sig själva inloggnings-endpointen), så det
+// finns ingen publik attackyta kvar för detta.
 const failedLogins = {};
-app.post("/admin/api/notify", async (req, res) => {
-  const { type, ...data } = req.body || {};
-  try {
-    if (type === "large_sale") {
-      const cfg = await getEmailConfig();
-      const threshold = cfg?.largePurchaseThreshold ?? 10000;
-      if ((data.total || 0) >= threshold) {
-        await sendNotification("largePurchase", `Stort köp genomfört — ${Number(data.total).toLocaleString("sv-SE")} kr`,
-          `<p>Ett köp på <strong>${Number(data.total).toLocaleString("sv-SE")} kr</strong> genomfördes.</p>
-           <p>Kund: ${data.buyer || "Okänd"}<br>Säljare: ${data.soldBy || "Okänd"}</p>`);
-      }
-    } else if (type === "failed_login") {
-      const ip = clientIp(req);
-      const key = (data.username || "okänd") + "|" + ip;
-      const now = Date.now();
-      failedLogins[key] = (failedLogins[key] || []).filter(t => now - t < 15 * 60 * 1000);
-      failedLogins[key].push(now);
-      if (failedLogins[key].length >= 3) {
-        await sendNotification("failedLogin", `Flera misslyckade inloggningsförsök — ${data.username || "okänd"}`,
-          `<p>Minst 3 misslyckade inloggningsförsök på användarnamnet <strong>${data.username || "okänd"}</strong> från IP ${ip} under de senaste 15 minuterna.</p>`);
-        failedLogins[key] = [];
-      }
-    }
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
 
 // Mejlar SPECIFIKA användare (inte den fasta admin-adressen) — används när
 // någon reserverar en del i ett annat lager än sitt eget, så rätt personal
@@ -1141,6 +1407,13 @@ app.get("/admin/api/backup-now", async (req, res) => {
 });
 
 app.get("/admin", (req, res) => {
+  // Admin-panelen är en separat, mindre sida med ett eget inline-skript
+  // (och ett eget skydd — Basic Auth via ADMIN_PANEL_PASSWORD). Den
+  // strikta CSP:n ovan (ingen 'unsafe-inline' för script-src) skulle
+  // annars blockera det skriptet helt. Ger den här EN sidan en egen,
+  // något mer tillåtande policy istället för att försvaga skyddet för
+  // HELA appen bara för den här enda, adminlösenordsskyddade sidan.
+  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'");
   res.send(`<!DOCTYPE html><html lang="sv"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Lager Admin</title>
@@ -1438,10 +1711,24 @@ async function getBackupCloudConfig() {
   if (!row) return null;
   try { return JSON.parse(row.value); } catch { return null; }
 }
+// Kontrollerar att en rclone-fjärr ser rimlig ut innan den ens skickas
+// vidare — bara bokstäver/siffror/bindestreck/understreck i själva
+// fjärrnamnet (före ":"), sen valfri sökväg. execFile() nedan gör redan
+// command injection omöjligt (inget skal tolkar strängen), men detta
+// stoppar uppenbart trasig/konstig indata tidigt också.
+function isValidRcloneRemote(remote) {
+  if (typeof remote !== "string" || !remote.includes(":")) return false;
+  const name = remote.split(":")[0];
+  return /^[A-Za-z0-9_-]+$/.test(name);
+}
+
 function pushBackupToCloud(filePath, remote) {
-  if (!remote) return;
-  const { exec } = require("child_process");
-  exec(`rclone copy "${filePath}" "${remote}"`, (err) => {
+  if (!remote || !isValidRcloneRemote(remote)) return;
+  const { execFile } = require("child_process");
+  // execFile (INTE exec) — argumenten skickas som en array direkt till
+  // rclone-programmet, aldrig genom ett skal som skulle kunna tolka
+  // specialtecken (;, |, $(), citattecken m.m.) som egna kommandon.
+  execFile("rclone", ["copy", filePath, remote], (err) => {
     if (err) console.error(`[backup] rclone-uppladdning misslyckades: ${err.message}`);
     else console.log(`[backup] Skickad till moln via rclone: ${path.basename(filePath)}`);
   });
@@ -1451,8 +1738,9 @@ app.post("/admin/api/backup-cloud/test", async (req, res) => {
   try {
     const { remote } = req.body || {};
     if (!remote) return res.status(400).json({ ok:false, error:"Ingen fjärr angiven." });
-    const { exec } = require("child_process");
-    exec(`rclone lsd "${remote.split(":")[0]}:" --max-depth 1`, { timeout: 10000 }, (err, stdout, stderr) => {
+    if (!isValidRcloneRemote(remote)) return res.status(400).json({ ok:false, error:"Ogiltigt format på fjärrens namn." });
+    const { execFile } = require("child_process");
+    execFile("rclone", ["lsd", remote.split(":")[0]+":", "--max-depth", "1"], { timeout: 10000 }, (err, stdout, stderr) => {
       if (err) return res.status(400).json({ ok:false, error: stderr?.trim() || err.message });
       res.json({ ok:true, message:"Anslutningen fungerar." });
     });

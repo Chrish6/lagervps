@@ -15,6 +15,9 @@ fi
 echo "Stoppar och tar bort containern..."
 docker compose down
 
+echo "Ser till att data/-mappen ägs av rätt användare (UID 1000)..."
+chown -R 1000:1000 data 2>/dev/null || echo "  (kunde inte ändra ägare — kör som root/sudo om detta behövs)"
+
 echo "Bygger om helt från grunden (ingen cache)..."
 docker compose build --no-cache
 

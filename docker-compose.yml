@@ -3,8 +3,29 @@ services:
     build: .
     container_name: lager
     restart: unless-stopped
+    # Traefik-mallen på den här servern kör i "host"-läge (delar serverns
+    # nätverk direkt, inget eget Docker-nätverk) — därför behåller vi den
+    # vanliga portbindningen mot 127.0.0.1, och pekar Traefik dit direkt via
+    # en uttrycklig URL i etiketterna nedan, istället för att förlita oss på
+    # Docker-nätverksbaserad upptäckt (som kräver att båda delar nätverk).
     ports:
-      - "127.0.0.1:3000:3000"   # nginx (HTTPS) på servern är nu enda vägen in
+      - "127.0.0.1:3000:3000"
+    # SÄKERHET: containern kör som en icke-root-användare (se Dockerfile),
+    # och dessa två rader stänger av ytterligare möjligheter för en process
+    # inuti containern att höja sina rättigheter eller göra saker den
+    # normalt aldrig behöver (t.ex. skapa nya enheter, ändra nätverksregler,
+    # byta ägare på systemfiler). En vanlig Node-webbserver behöver inget av
+    # det, så det tas bort helt istället för att bara lita på standardläget.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.lager.rule=Host(`lager.onwheels.se`)"
+      - "traefik.http.routers.lager.entrypoints=websecure"
+      - "traefik.http.routers.lager.tls.certresolver=letsencrypt"
+      - "traefik.http.services.lager.loadbalancer.server.url=http://127.0.0.1:3000"
     volumes:
       # KRITISKT: utan de här skulle databasen och backuperna raderas varje
       # gång containern byggs om (t.ex. vid en uppdatering). Mappen ./data

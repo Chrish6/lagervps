@@ -27,6 +27,9 @@ fi
 echo ""
 echo "[3/4] Skapar mapp för beständig data (databas, backuper)..."
 mkdir -p data
+# Containern kör som en icke-root-användare (UID 1000) av säkerhetsskäl —
+# mappen måste ägas av samma UID för att containern ska kunna skriva dit.
+chown -R 1000:1000 data 2>/dev/null || true
 echo "  Klart: ./data"
 
 echo ""

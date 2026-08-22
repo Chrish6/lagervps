@@ -14,7 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+# npm ci (inte npm install) — installerar EXAKT de versioner som står i
+# package-lock.json, inget annat. Förutsägbart, samma resultat varje gång,
+# istället för att npm install kan välja nyare kompatibla versioner som
+# aldrig testats.
+RUN npm ci
 COPY . .
 # Körs INNAN bygget — misslyckas testerna avbryts hela Docker-bygget här,
 # och den gamla, redan körande containern påverkas inte alls (Docker byter
@@ -28,10 +32,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
 COPY server.cjs ./
 COPY restore.cjs ./
+
+# SÄKERHET: kör INTE som root inuti containern. UID 1000 är standard för
+# den första vanliga användaren på de flesta Linux-system (matchar
+# ./data-mappens ägare på VPS:en, satt automatiskt av update.sh/install.sh).
+# Node-baserade images HAR OFTA redan en färdig användare med exakt UID
+# 1000 (brukar heta "node") — kollar därför om den finns innan en ny
+# skapas, annars skulle bygget krascha på en UID-krock. Använder sedan
+# UID:et direkt (inte ett namn) i USER-raden, så det fungerar oavsett vad
+# användaren råkar heta i just den här bas-imagen.
+RUN if ! id -u 1000 >/dev/null 2>&1; then \
+      groupadd -g 1000 lager && useradd -u 1000 -g 1000 -s /bin/false -M lager; \
+    fi \
+    && chown -R 1000:1000 /app
+USER 1000
 
 EXPOSE 3000
 
