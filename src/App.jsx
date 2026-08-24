@@ -4863,7 +4863,11 @@ function DashboardPage({ items, sales, users, can, isAdmin, currentUser, push, p
 }
 
 // ─── Status helpers ───────────────────────────────────────────────────────────
-const sc = q => q===0?R:GR;
+// Tre nivåer istället för bara två — "lågt lager" ska ha en diskret
+// varningsfärg, rött ska bara betyda "slut" (strategins avsnitt 6.3).
+// threshold kommer från settings.lowStockAlert, som redan fanns definierad
+// men aldrig användes någonstans i hela appen innan detta.
+const sc = (q, threshold=2) => q===0 ? R : q<=threshold ? AM : GR;
 const cc = c => c==="Ny"?GR:c?.includes("Gott")?BX:c?.includes("spricka")?AM:MU;
 
 // ─── Login Page ───────────────────────────────────────────────────────────────
@@ -5184,12 +5188,9 @@ function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSe
       )}
 
       <div style={{padding:"clamp(14px,2vw,28px)",paddingBottom:80}}>
-        {!currentUser && (
-          <div style={{background:NOTEBG,border:`1px solid ${AM}40`,borderRadius:8,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:10}}>
-            <span style={{fontSize:13,color:AM,fontWeight:600}}>Gästläge — Skrivskyddad</span>
-            <button onClick={()=>push("login")} style={{marginLeft:"auto",background:AM,color:WH,border:"none",borderRadius:5,padding:"5px 14px",fontSize:12,fontWeight:700}}>Logga in</button>
-          </div>
-        )}
+        {/* Gästläget togs bort helt tidigare (ingen kan nå den här sidan utan
+            inloggning längre) — den gamla "Gästläge — Skrivskyddad"-bannern
+            som fanns här var därför dödkod, borttagen. */}
 
         {/* Search + toolbar — sök alltid på rad 1, knappar på rad 2 */}
         <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:8}}>
@@ -5316,7 +5317,7 @@ function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSe
                 if (group.length === 1) {
                   const item = group[0];
                   return (
-                    <ItemCard item={item} can={can} isAdmin={isAdmin} canManageItem={canManageItem}
+                    <ItemCard item={item} can={can} isAdmin={isAdmin} canManageItem={canManageItem} lowStockThreshold={settings?.lowStockAlert}
                       onDetail={()=>push("detail",{item})}
                       onEdit={()=>push("edit",{item})}
                       onSell={()=>push("sell",{item, maxQty: Math.max(0,(item.quantity||0)-(item.reservations?.length||0))})}
@@ -5364,7 +5365,7 @@ function InventoryPage({ items, sales, can, currentUser, isAdmin, session, setSe
                   return groups2.map(({key,items:g}) => {
                     if(g.length===1) {
                       const item=g[0];
-                      return <ListRow key={item.id} item={item} can={can} isAdmin={isAdmin} canManageItem={canManageItem}
+                      return <ListRow key={item.id} item={item} can={can} isAdmin={isAdmin} canManageItem={canManageItem} lowStockThreshold={settings?.lowStockAlert}
                         onDetail={()=>push("detail",{item})}
                         onEdit={()=>push("edit",{item})}
                         onSell={()=>push("sell",{item})}
@@ -5609,7 +5610,7 @@ function VariantsPage({ sku, items, sales, can, isAdmin, push, pop, addToCart, t
 
 
 // ─── Item Card ────────────────────────────────────────────────────────────────
-const ItemCard = React.memo(function ItemCard({ item, can, isAdmin, onDetail, onEdit, onSell, onAddToCart, onDelete, onReserve, canManageItem }) {
+const ItemCard = React.memo(function ItemCard({ item, can, isAdmin, onDetail, onEdit, onSell, onAddToCart, onDelete, onReserve, canManageItem, lowStockThreshold=2 }) {
   const location = [item.locationType, item.location].filter(Boolean).join(" ");
   const imgSrc = item.thumb || item.images?.[0] || (item.hasImages>0 ? `/api/img/${item.id}?v=${item.updatedAt||0}` : null);
   const freeQtyCard = Math.max(0, (item.quantity||0) - (item.reservations?.length||0));
@@ -5653,7 +5654,7 @@ const ItemCard = React.memo(function ItemCard({ item, can, isAdmin, onDetail, on
           <div style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:20,fontWeight:800,color:BX,lineHeight:1}}>{(item.price||0).toLocaleString("sv-SE")} kr</div>
         </div>
         <div style={{textAlign:"right",lineHeight:1,marginLeft:"auto"}}>
-          <span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:22,fontWeight:800,color:item.quantity===0?R:GR}}>{item.quantity}</span>
+          <span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:22,fontWeight:800,color:sc(item.quantity,lowStockThreshold)}}>{item.quantity}</span>
           <span style={{fontSize:10,color:MU,marginLeft:2}}>st</span>
         </div>
         <div style={{display:"flex",gap:4}}>
@@ -5668,16 +5669,28 @@ const ItemCard = React.memo(function ItemCard({ item, can, isAdmin, onDetail, on
 });
 
 // ─── List Row ─────────────────────────────────────────────────────────────────
-function ListRow({ item, can, isAdmin, onDetail, onEdit, onSell, onAddToCart, onDelete, canManageItem }) {
+function ListRow({ item, can, isAdmin, onDetail, onEdit, onSell, onAddToCart, onDelete, canManageItem, lowStockThreshold=2 }) {
   const [bg, setBg] = useState("transparent");
   return (
     <tr style={{borderBottom:`1px solid ${BD}50`,cursor:"pointer",background:bg}} onMouseEnter={()=>setBg(BG)} onMouseLeave={()=>setBg("transparent")} onClick={onDetail}>
       <td style={{padding:"7px 10px"}}><div style={{width:36,height:36,borderRadius:6,overflow:"hidden",background:BG,border:`1px solid ${BD}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>{(item.thumb||item.images?.[0])?<img src={item.thumb||item.images[0]} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:<Icon name="wrench" style={{color:MU}}/>}</div></td>
-      <td style={{padding:"7px 10px"}}><div style={{fontWeight:600,fontSize:13}}>{item.stockNumber&&<span style={{background:BX,color:WH,borderRadius:4,padding:"1px 6px",fontSize:10,fontWeight:800,marginRight:5}}>#{item.stockNumber}</span>}{item.name}{item.side&&<span style={{color:MU,fontWeight:400}}> — {item.side}</span>}</div>{item.oem&&<div style={{fontSize:11,color:MU}}>Art.nr: {item.oem}</div>}</td>
+      <td style={{padding:"7px 10px"}}>
+        <div style={{fontWeight:600,fontSize:13,display:"flex",alignItems:"center",flexWrap:"wrap",gap:5}}>
+          {item.stockNumber&&<span style={{background:BX,color:WH,borderRadius:4,padding:"1px 6px",fontSize:10,fontWeight:800}}>#{item.stockNumber}</span>}
+          {item.name}{item.side&&<span style={{color:MU,fontWeight:400}}> — {item.side}</span>}
+          {/* Reservation ska synas direkt i listan, inte bara efter att man öppnat delen (strategin avsnitt 6.3) */}
+          {item.reservations?.length>0&&(
+            <span style={{background:`${AM}18`,color:AM,borderRadius:10,padding:"1px 7px",fontSize:10,fontWeight:800,display:"inline-flex",alignItems:"center",gap:3}}>
+              <i className="fa-solid fa-bookmark" style={{fontSize:8}}/>{item.reservations.length}
+            </span>
+          )}
+        </div>
+        {item.oem&&<div style={{fontSize:11,color:MU}}>Art.nr: {item.oem}</div>}
+      </td>
       <td style={{padding:"7px 10px",fontSize:11,color:MU}}>{item.sku}</td>
       <td style={{padding:"7px 10px"}}><Badge label={item.category} color={BX} small /></td>
       <td style={{padding:"7px 10px"}}><Badge label={item.condition} color={cc(item.condition)} small /></td>
-      <td style={{padding:"7px 10px"}}><span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:20,fontWeight:800,color:sc(item.quantity)}}>{item.quantity}</span></td>
+      <td style={{padding:"7px 10px"}}><span style={{fontFamily:"'Barlow Condensed',sans-serif",fontSize:20,fontWeight:800,color:sc(item.quantity,lowStockThreshold)}}>{item.quantity}</span></td>
       <td style={{padding:"7px 10px",fontWeight:600,fontSize:13}}>{item.price.toLocaleString("sv-SE")} kr</td>
       <td style={{padding:"7px 10px",fontSize:11,color:MU}}>{item.location}</td>
       <td style={{padding:"7px 10px"}} onClick={e=>e.stopPropagation()}>
@@ -5962,6 +5975,8 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
     groupKeys = groupKeys.filter(k => groups[k].some(r => (now - (r.ts||0)) < 7*864e5)); // senaste 7 dagar
   } else if (quickFilter==="many") {
     groupKeys = groupKeys.filter(k => groups[k].length >= 2); // flera delar
+  } else if (quickFilter==="overdue") {
+    groupKeys = groupKeys.filter(k => Math.floor((now - Math.min(...groups[k].map(r=>r.ts||now))) / 864e5) >= 14);
   }
   // Sortering
   const groupVal = (k) => {
@@ -5982,6 +5997,20 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
     else cmp = String(va).localeCompare(String(vb), "sv", { sensitivity:"base", numeric:true });
     return sortDir==="asc" ? cmp : -cmp;
   });
+
+  // Status-kategorisering — strategin kräver uttryckligen: "Status: Aktiv,
+  // Snart förfallen, Förfallen, Klar/avslutad." Fanns ingen sådan
+  // indikation alls tidigare, bara "senaste 7 dagar"-filtret som visar
+  // NYA reservationer, inte vilka som legat länge utan åtgärd. Samma
+  // 14-dagarsgräns som redan används i dashboardens motsvarande widget
+  // (Fas 4), för konsekvens genom hela appen.
+  const RESERVATION_SOON_DAYS = 7, RESERVATION_OVERDUE_DAYS = 14;
+  const reservationStatus = (ageDays) => {
+    if (ageDays >= RESERVATION_OVERDUE_DAYS) return { label:"Förfallen", color:R };
+    if (ageDays >= RESERVATION_SOON_DAYS) return { label:"Snart förfallen", color:AM };
+    return { label:"Aktiv", color:GR };
+  };
+  const groupAgeDays = (k) => Math.floor((now - Math.min(...groups[k].map(r=>r.ts||now))) / 864e5);
 
   return (
     <Page>
@@ -6029,6 +6058,7 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
         <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
           {[
             {k:"all",l:"Alla"},
+            {k:"overdue",l:"Kräver uppföljning"},
             {k:"recent",l:"Senaste 7 dagar"},
             {k:"many",l:"Flera delar"},
           ].map(qf=>(
@@ -6056,16 +6086,25 @@ function ReservationsPage({ items, saveItems, can, isAdmin, currentUser, push, p
               const canSell = isAdmin || can("canSell");
               const canEditRes = isAdmin || can("canEditReservations");
               const isOpen = expanded.has(reg);
+              const ageDays = groupAgeDays(reg);
+              const status = reservationStatus(ageDays);
               return (
-                <div key={reg} style={{background:WH,borderRadius:12,border:`1.5px solid ${AM}40`,overflow:"hidden"}}>
+                <div key={reg} style={{background:WH,borderRadius:12,border:`1.5px solid ${status.color}40`,overflow:"hidden"}}>
                   {/* Bil-header (klickbar dropdown) */}
-                  <div onClick={()=>toggleExpand(reg)} style={{background:AM+"1A",padding:"10px 14px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",borderBottom:isOpen?`1px solid ${AM}25`:"none"}}>
-                    <Icon name={isOpen?"chevron-down":"chevron-right"} style={{color:AM,fontSize:13,flexShrink:0}}/>
-                    <span style={{background:AM,color:WH,borderRadius:6,padding:"3px 11px",fontSize:16,fontWeight:800,letterSpacing:1,fontFamily:"monospace"}}>{reg}</span>
+                  <div onClick={()=>toggleExpand(reg)} style={{background:`${status.color}1A`,padding:"10px 14px",display:"flex",alignItems:"center",gap:10,cursor:"pointer",borderBottom:isOpen?`1px solid ${status.color}25`:"none"}}>
+                    <Icon name={isOpen?"chevron-down":"chevron-right"} style={{color:status.color,fontSize:13,flexShrink:0}}/>
+                    <span style={{background:status.color,color:WH,borderRadius:6,padding:"3px 11px",fontSize:16,fontWeight:800,letterSpacing:1,fontFamily:"monospace"}}>{reg}</span>
+                    {/* Kopiera regnummer — den huvudsakliga kontaktreferensen på
+                        en reservation, snabbåtgärd enligt strategins avsnitt 8.2 */}
+                    <button onClick={e=>{e.stopPropagation();copyText(reg).then(()=>toast$("Regnummer kopierat","success"));}} title="Kopiera regnummer"
+                      style={{background:"none",border:"none",color:status.color,cursor:"pointer",padding:4,flexShrink:0}}>
+                      <Icon name="copy" style={{fontSize:12}}/>
+                    </button>
                     {customer&&<span style={{fontSize:13,fontWeight:700,color:TX,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{customer}</span>}
+                    <span style={{flexShrink:0,fontSize:10,fontWeight:800,color:status.color,textTransform:"uppercase",letterSpacing:.5}}>{status.label}</span>
                     <div style={{marginLeft:"auto",textAlign:"right",flexShrink:0}}>
                       <div style={{fontSize:16,fontWeight:800,color:BX,fontFamily:"'Barlow Condensed',sans-serif",lineHeight:1}}>{total.toLocaleString("sv-SE")} kr</div>
-                      <div style={{fontSize:10,color:AM,fontWeight:700}}>{list.length} {list.length===1?"del":"delar"}</div>
+                      <div style={{fontSize:10,color:MU,fontWeight:700}}>{list.length} {list.length===1?"del":"delar"} · {ageDays}d</div>
                     </div>
                   </div>
 
@@ -6436,16 +6475,51 @@ function DetailPage({ item: initialItem, items, sales, saveItems, saveSales, add
   const canDeleteBtn = (can("canDelete")||isAdmin) && canManageItem(item);
   const restrictedToOtherWarehouse = !canManageItem(item) && item.warehouse;
 
+  // "Mer"-meny — samlar sällan använda och DESTRUKTIVA åtgärder separat
+  // från de primära (Sälj/Reservera/Redigera/Skriv ut), enligt strategins
+  // avsnitt 7.1 och princip 5 ("destruktiva åtgärder ska vara tydligt
+  // separerade från normala åtgärder"). Innan låg "Ta bort" direkt bredvid
+  // Sälj/Reservera i samma rad — ett klick-fel bort från de vanligaste
+  // åtgärderna, exakt det principen varnar för.
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+  // Esc stänger menyn — samma tillgänglighetsmönster som Modal-komponenten
+  // (Fas 2). Saknades här när menyn först byggdes i Fas 6.
+  useEffect(() => {
+    if (!showMoreMenu) return;
+    const onKey = e => { if (e.key==="Escape") setShowMoreMenu(false); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [showMoreMenu]);
+  const moreMenuItems = [
+    { icon:"share-nodes", label:"Dela", onClick:shareLink, show:true },
+    { icon:"trash", label:"Ta bort", onClick:()=>setConfirmDel(true), show:canDeleteBtn, danger:true },
+  ].filter(i=>i.show);
+
   const right = (
-    <div style={{display:"flex",gap:6,alignItems:"center"}}>
-      <Btn small variant="ghost" onClick={shareLink}><Icon name="share-nodes"/></Btn>
+    <div style={{display:"flex",gap:6,alignItems:"center",position:"relative"}}>
       <Btn small variant="ghost" onClick={printProduct}><Icon name="print"/></Btn>
       {canReserveBtn&&<Btn small variant="ghost" onClick={()=>setShowReserve(true)}><Icon name="bookmark"/>{!isMobile&&" Reservera"}</Btn>}
       {canSellBtn&&<Btn small variant="red" onClick={()=>push("sell",{item, maxQty:freeQty})}><Icon name="tag"/>{!isMobile&&" Sälj"}</Btn>}
       {canEditBtn&&<Btn small variant="ghost" onClick={()=>push("edit",{item})}><Icon name="pen"/></Btn>}
-      {/* På dator: kassa + ta bort också uppe. På mobil: dessa hamnar längst ner. */}
       {!isMobile&&canCart&&<Btn small variant="blue" onClick={()=>{ addToCart(item); toast$(`${item.name} tillagd i korgen`,"success"); }}><Icon name="cart-shopping"/> Kassa</Btn>}
-      {!isMobile&&canDeleteBtn&&<Btn small variant="ghost" onClick={()=>setConfirmDel(true)} style={{color:R}}><Icon name="trash"/></Btn>}
+      {moreMenuItems.length>0&&(
+        <>
+          <Btn small variant="ghost" onClick={()=>setShowMoreMenu(s=>!s)}><Icon name="ellipsis-vertical"/></Btn>
+          {showMoreMenu&&(
+            <>
+              <div style={{position:"fixed",inset:0,zIndex:29}} onClick={()=>setShowMoreMenu(false)}/>
+              <div style={{position:"absolute",top:"100%",right:0,marginTop:6,background:WH,borderRadius:10,border:`1px solid ${BD}`,boxShadow:SH2,minWidth:160,zIndex:30,overflow:"hidden"}}>
+                {moreMenuItems.map(m=>(
+                  <button key={m.label} onClick={()=>{setShowMoreMenu(false);m.onClick();}}
+                    style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:"none",border:"none",cursor:"pointer",textAlign:"left",color:m.danger?R:TX,fontSize:13,fontWeight:500}}>
+                    <Icon name={m.icon} style={{fontSize:13,width:14}}/>{m.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 
@@ -6711,11 +6785,13 @@ function DetailPage({ item: initialItem, items, sales, saveItems, saveSales, add
           </button>
         </div>
 
-        {/* Mobil — kassa & ta bort längst ner (de nya knapparna) */}
-        {isMobile&&(canCart||canDeleteBtn)&&(
+        {/* Mobil — kassa längst ner. "Ta bort" flyttad till "Mer"-menyn
+            (samma ändring som gjordes uppe i toppraden) — en destruktiv
+            åtgärd ska inte vara lika stor och lättåtkomlig som "Lägg i
+            kassa", enligt strategins princip om säker interaktion. */}
+        {isMobile&&canCart&&(
           <div style={{display:"flex",gap:8,marginTop:16}}>
-            {canCart&&<Btn full variant="blue" onClick={()=>{ addToCart(item); toast$(`${item.name} tillagd i korgen`,"success"); }}><Icon name="cart-shopping"/> Lägg i kassa</Btn>}
-            {canDeleteBtn&&<Btn full variant="ghost" onClick={()=>setConfirmDel(true)} style={{color:R,borderColor:R+"40"}}><Icon name="trash"/> Ta bort</Btn>}
+            <Btn full variant="blue" onClick={()=>{ addToCart(item); toast$(`${item.name} tillagd i korgen`,"success"); }}><Icon name="cart-shopping"/> Lägg i kassa</Btn>
           </div>
         )}
 
