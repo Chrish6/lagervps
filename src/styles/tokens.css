@@ -1,0 +1,98 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   DESIGNTOKENS — Lager
+   Fas 1 i redesign-färdplanen. Formaliserar de färger, mellanrum och
+   typsnittsstorlekar som REDAN används genomgående i appen idag (se
+   fas0-inventering.md) till en gemensam, namngiven källa. Ändrar INGET
+   existerande utseende — bara ger framtida komponenter (Fas 2+) en delad
+   vokabulär att bygga från, istället för spridda inline-värden.
+
+   Ljust/mörkt tema hanteras redan idag via :root / html.theme-dark i
+   App.jsx — de sex neutrala färgerna nedan är HÄMTADE DÄRIFRÅN rakt av,
+   inte omdefinierade. Varumärkesfärgerna (blått/rött/grönt/orange) är
+   medvetet identiska i båda lägena, exakt som i den befintliga koden.
+   ───────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* ── Neutrala färger (ljust läge) — identiska med befintlig :root ── */
+  --color-bg: #F4F5F7;
+  --color-surface: #FFFFFF;
+  --color-border: #E2E5EA;
+  --color-text: #141820;
+  --color-text-muted: #3D4451;
+  --color-text-faint: #8A90A0;
+  --color-note-bg: #FFFBEB;
+
+  /* ── Varumärkesfärger — samma i ljust och mörkt läge ── */
+  --color-brand-blue: #1B3A6B;
+  --color-brand-red: #CC1B2B;
+  --color-success: #16A34A;
+  --color-warning: #D97706;
+  /* Aktiv/interaktiv blå — byts till en ljusare nyans i mörkt läge för
+     kontrast (--b-solid i befintlig kod) */
+  --color-accent: #1B3A6B;
+
+  /* ── Skuggor — identiska med befintliga SH/SH2 ── */
+  --shadow-sm: 0 1px 4px rgba(0,0,0,.08);
+  --shadow-md: 0 4px 20px rgba(0,0,0,.12);
+
+  /* ── Spacing-skala (4/8px-bas, enligt designstrategin avsnitt 10.3) ──
+     Namnen matchar hur de faktiskt används i koden idag: t-shirt-storlekar
+     istället för siffror, lättare att komma ihåg och använda konsekvent. */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-2xl: 32px;
+
+  /* ── Radius — 10px är redan den vanligaste enskilda radien i koden
+     (119 förekomster), matchar strategins rekommendation (10–14px för
+     cards). Mindre element (chips, badges) använder den mindre skalan. ── */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+
+  /* ── Typografi — Barlow, samma typsnitt som redan laddas idag.
+     Storlekarna matchar de facto-standarden i koden (13px är vanligast
+     för brödtext, 11px för metadata) snarare än att uppfinna nya värden. ── */
+  --font-family: 'Barlow', sans-serif;
+  --font-family-display: 'Barlow Condensed', sans-serif; /* används för stora numeriska KPI:er */
+
+  --text-xs: 11px;   /* metadata, tidsstämplar */
+  --text-sm: 12px;   /* sekundär text, chips */
+  --text-base: 13px; /* standard brödtext/tabelltext — vanligast i koden */
+  --text-md: 14px;   /* något framhävd text */
+  --text-lg: 16px;   /* sektionsrubriker (mindre) */
+  --text-xl: 20px;   /* sektionsrubriker (större) */
+  --text-2xl: 28px;  /* sidhuvud */
+
+  /* KPI-siffror ska vara visuellt större än sina etiketter (strategin
+     avsnitt 10.2) — separat skala för det syftet specifikt. */
+  --text-kpi: 32px;
+
+  /* ── Touch-mål — minst 44px enligt strategins tillgänglighetskrav ── */
+  --touch-target-min: 44px;
+  --input-height-desktop: 40px;
+}
+
+html.theme-dark {
+  --color-bg: #1A2029;
+  --color-surface: #242B37;
+  --color-border: #3A4356;
+  --color-text: #E8EBF0;
+  --color-text-muted: #AEB6C4;
+  --color-text-faint: #838CA0;
+  --color-note-bg: #2E2A18;
+  --color-accent: #4A7CE0; /* ljusare blå för kontrast mot mörk bakgrund, matchar befintlig --b-solid i mörkt läge */
+}
+
+/* ── Breakpoints (avsnitt 12) — dokumenterade här som referens.
+   CSS custom properties kan inte användas i media queries direkt, så
+   dessa är till för att SLÅ UPP rätt värde när komponenter skriver sina
+   egna @media-regler, inte för direkt användning i CSS. ──
+   Mobil:      < 600px
+   Surfplatta: 600–899px
+   Laptop:     900–1199px
+   Desktop:    ≥ 1200px
+*/
