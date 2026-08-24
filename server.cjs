@@ -1774,6 +1774,36 @@ function isValidRcloneRemote(remote) {
 function pushBackupToCloud(filePath, remote) {
   if (!remote || !isValidRcloneRemote(remote)) return;
   const { execFile } = require("child_process");
+
+  // SÄKERHET: den LOKALA backupen på servern behåller lösenordshashar
+  // orörda — de behövs för en riktig katastrofåterställning (om man
+  // återställer på en helt ny, tom server finns annars inga lösenord
+  // kvar att sätta tillbaka, och alla låses ute precis när backupen
+  // behövs som mest). MEN kopian som skickas vidare till extern
+  // molnlagring är en annan risknivå — den lämnar servern och passerar
+  // en tredjepartstjänst — så DEN kopian har hashar borttagna innan
+  // uppladdning. Gäller bara JSON-backupen (Excel-backupen innehåller
+  // aldrig användardata alls).
+  if (filePath.endsWith(".json")) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      if (Array.isArray(raw.users)) {
+        const redacted = { ...raw, users: raw.users.map(u => { const { password, ...rest } = u; return rest; }) };
+        const redactedPath = filePath.replace(/\.json$/, ".cloudsafe.json");
+        fs.writeFileSync(redactedPath, JSON.stringify(redacted));
+        execFile("rclone", ["copy", redactedPath, remote], (err) => {
+          fs.unlink(redactedPath, () => {}); // städa bort temp-filen oavsett resultat
+          if (err) console.error(`[backup] rclone-uppladdning misslyckades: ${err.message}`);
+          else console.log(`[backup] Skickad till moln via rclone (utan lösenordshashar): ${path.basename(filePath)}`);
+        });
+        return;
+      }
+    } catch (e) {
+      console.error(`[backup] Kunde inte redigera bort lösenord innan molnuppladdning: ${e.message}`);
+      return; // hellre INTE ladda upp alls än att av misstag skicka med hashar
+    }
+  }
+
   // execFile (INTE exec) — argumenten skickas som en array direkt till
   // rclone-programmet, aldrig genom ett skal som skulle kunna tolka
   // specialtecken (;, |, $(), citattecken m.m.) som egna kommandon.

@@ -16,8 +16,38 @@ if (!fs.existsSync(backupFile)) {
   process.exit(1);
 }
 
-const DB_PATH = path.join(__dirname, "lager.db");
+// SÄKERHET/DRIFT: samma DB_PATH-mönster som server.cjs — annars skriver
+// detta skript till fel fil i Docker-miljön (där riktiga databasen ligger
+// på /app/data/lager.db, inte bredvid själva skriptet), och rapporterar
+// "lyckad återställning" trots att den riktiga produktionsdatabasen
+// aldrig rördes alls.
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "lager.db");
 const db = new sqlite3.Database(DB_PATH);
+console.log(`Använder databas: ${DB_PATH}`);
+
+// SÄKERHET: exakt samma bildvalidering som server.cjs använder för webb-
+// baserad återställning (riktiga JPEG/PNG/WebP-signaturer, max 8MB per
+// bild) — annars skulle det här kommandoradsverktyget vara en oskyddad
+// bakväg som skriver in ovaliderade "bilder" direkt i databasen, förbi
+// alla kontroller webb-API:t redan har.
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+function isValidImageDataUrl(dataUrl) {
+  if (typeof dataUrl !== "string") return false;
+  const m = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
+  if (!m) return false;
+  const declaredType = m[1].toLowerCase();
+  if (!["image/jpeg", "image/png", "image/webp"].includes(declaredType)) return false;
+  let buf;
+  try { buf = Buffer.from(m[2], "base64"); } catch { return false; }
+  if (buf.length === 0 || buf.length > MAX_IMAGE_BYTES) return false;
+  const isJpeg = buf[0]===0xFF && buf[1]===0xD8 && buf[2]===0xFF;
+  const isPng  = buf[0]===0x89 && buf[1]===0x50 && buf[2]===0x4E && buf[3]===0x47;
+  const isWebp = buf.length>12 && buf.toString("ascii",0,4)==="RIFF" && buf.toString("ascii",8,12)==="WEBP";
+  if (declaredType==="image/jpeg" && !isJpeg) return false;
+  if (declaredType==="image/png" && !isPng) return false;
+  if (declaredType==="image/webp" && !isWebp) return false;
+  return true;
+}
 
 function run(sql, params) {
   return new Promise((resolve, reject) => {
@@ -45,19 +75,25 @@ function run(sql, params) {
     // Dela upp items i lätt lista + bilder
     const lightItems = [];
     let imageCount = 0;
+    let skippedInvalidImages = 0;
 
     console.log("  Bearbetar bilder...");
     await run("BEGIN TRANSACTION");
     await run("DELETE FROM images");
 
     for (const it of data.items) {
-      const imgs = it.images || [];
-      const thumb = it.thumb || (imgs.length > 0 ? imgs[0] : null);
+      const rawImgs = it.images || [];
+      const imgs = rawImgs.filter(isValidImageDataUrl);
+      skippedInvalidImages += rawImgs.length - imgs.length;
+      const thumb = it.thumb && isValidImageDataUrl(it.thumb) ? it.thumb : (imgs.length > 0 ? imgs[0] : null);
       lightItems.push({ ...it, images: [], hasImages: imgs.length, thumb });
       if (imgs.length > 0) {
         await run("INSERT OR REPLACE INTO images(item_id,data) VALUES(?,?)", [it.id, JSON.stringify(imgs)]);
         imageCount++;
       }
+    }
+    if (skippedInvalidImages > 0) {
+      console.log(`  OBS: hoppade över ${skippedInvalidImages} ogiltiga bilder (fel format eller för stora)`);
     }
 
     // Spara lätt lista + övrig data

@@ -1,0 +1,36 @@
+# VIKTIGT: den här filen MÅSTE heta exakt ".gitignore" (med punkten
+# först, ingen annan ändelse) för att Git ska använda den alls. En fil
+# som t.ex. råkar heta "download" eller ".gitignore.txt" ignoreras helt
+# av Git, även om innehållet ser rätt ut.
+
+# Beroenden och byggresultat — byggs om från källkoden vid behov,
+# ska aldrig ligga i repot
+node_modules/
+dist/
+dist-app/
+electron-dist/
+
+# All beständig data — databasen, backuper, allt som ligger i den
+# mapp Docker monterar in (./data:/app/data, se docker-compose.yml).
+# Detta är RIKTIG affärsdata (lagerdelar, kunder, lösenordshashar) och
+# ska ALDRIG hamna i ett repository, publikt eller inte.
+data/
+backups/
+pre-update-backups/
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+credentials.enc
+
+# Miljövariabler och hemligheter — SETUP_TOKEN, HEALTHCHECK_TOKEN och
+# liknande ska bara finnas lokalt på servern, aldrig i repot
+.env
+.env.*
+!.env.example
+
+# Loggar och systemfiler
+*.log
+.DS_Store
+.vscode/
+.idea/
